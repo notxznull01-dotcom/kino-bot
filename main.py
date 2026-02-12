@@ -4,8 +4,6 @@ import os
 import logging
 import sys
 import random
-import secrets
-import string
 from datetime import datetime, timedelta
 from threading import Thread
 from flask import Flask
@@ -15,416 +13,333 @@ from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
-    ReplyKeyboardRemove, 
-    CallbackQuery, 
-    Message, 
-    ContentType,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    InputFile
+    CallbackQuery, Message, ContentType, 
+    InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
 )
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 
-# ================= KONFIGURATSIYA =================
+# ================= 1. KONFIGURATSIYA =================
 TOKEN = "8366692220:AAHaJhbqksDOn_TgDp645GIliCT__4yZlUk"
 ADMIN_ID = 7492227388 
-ADMIN_PASS = "456"
-DB_FILE = "database.json"
-LOG_FILE = "bot_logs.log"
+DB_FILE = "cinema_v5_pro.json"
 
-# --- FLASK (KEEP ALIVE) ---
-app = Flask('')
-
+# --- WEB SERVER (KEEP ALIVE) ---
+app = Flask(__name__)
 @app.route('/')
 def home():
-    return "🚀 Bot status: Active | System: Stable"
+    return f"🚀 BOT CORE V5: ONLINE | {datetime.now().strftime('%H:%M:%S')}"
 
-def run():
-    # Render uchun portni avtomatik aniqlash
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
+def run_flask():
+    app.run(host='0.0.0.0', port=8080)
 
-def keep_alive():
-    t = Thread(target=run)
-    t.daemon = True
-    t.start()
-
-# Loglarni mukammal sozlash
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - [%(levelname)s] - %(name)s - %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(LOG_FILE)
-    ]
-)
-logger = logging.getLogger(__name__)
-
+# --- LOGGING ---
+logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# ================= MA'LUMOTLAR BAZASI (XAVFSIZLIK BILAN) =================
-def load_db():
-    if not os.path.exists(DB_FILE):
-        initial_data = {
-            "users": {},
-            "banned": [],
-            "movies": [],
-            "total_orders": 0,
-            "referrals": {},
-            "daily_bonus": {},
-            "promocodes": {},
-            "transactions": [],
-            "system_stats": {"total_visits": 0, "total_buys": 0}
-        }
-        save_db(initial_data)
-        return initial_data
-    try:
+# ================= 2. PROFESSIONAL MA'LUMOTLAR BAZASI =================
+class Database:
+    @staticmethod
+    def initialize():
+        if not os.path.exists(DB_FILE):
+            data = {
+                "users": {},
+                "movies": [],
+                "banned": [],
+                "stats": {"total_sales": 0, "revenue": 0},
+                "chats": {} # Jonli chat sessiyalari uchun
+            }
+            Database.save(data)
+        return Database.load()
+
+    @staticmethod
+    def load():
         with open(DB_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-    except Exception as e:
-        logger.critical(f"BAZA YUKLASHDA XATO: {e}")
-        return None
 
-def save_db(data):
-    try:
+    @staticmethod
+    def save(data):
         with open(DB_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=4)
-    except Exception as e:
-        logger.error(f"BAZA SAQLASHDA XATO: {e}")
+            json.dump(data, f, indent=4, ensure_ascii=False)
 
-# ================= FSM HOLATLARI (KENGAYTIRILGAN) =================
+# ================= 3. FSM (HOLATLAR) TIZIMI =================
 class BotState(StatesGroup):
-    # Ro'yxatdan o'tish
-    waiting_name = State()
-    waiting_phone = State()
+    # Registration
+    wait_name = State()
+    wait_phone = State()
     
-    # Admin Panel
-    admin_auth = State()
+    # User Features
+    search_movie = State()
+    fill_balance = State()
     
-    # Kino amallari
-    adding_k_name = State()
-    adding_k_year = State()
-    adding_k_link = State()
-    adding_k_price = State()
-    deleting_k_id = State()
+    # Live Chat System
+    chat_request = State() # Foydalanuvchi javobini kutish
+    active_chat = State()  # Jonli suhbat jarayoni
     
-    # Jonli muloqot
-    admin_chat_target = State()
-    in_active_chat = State()
+    # Admin - Kino qo'shish
+    adm_name = State()
+    adm_year = State()
+    adm_lang = State()
+    adm_code = State()
+    adm_link = State()
+    adm_price = State()
     
-    # Reklama va Xabarlar
-    sending_broadcast = State()
-    sending_personal_msg = State()
-    
-    # Moliya
-    transfer_id = State()
-    transfer_amount = State()
-    entering_promo = State()
-    
-    # Bloklash
-    blocking_id = State()
+    # Admin - Boshqaruv
+    adm_broadcast = State()
+    adm_give_id = State()
+    adm_give_amount = State()
+    adm_take_id = State()
+    adm_take_amount = State()
+    adm_ban_id = State()
+    adm_chat_target = State() # Qaysi user bilan gaplashmoqchi
+    adm_del_movie = State()
 
-# ================= KLAVIATURALAR TIZIMI =================
-def get_main_kb(uid):
-    builder = ReplyKeyboardBuilder()
-    builder.button(text="🎬 Kinolar Ro'yxati")
-    builder.button(text="🎟 Kino sotib olish")
-    builder.button(text="💰 Hisobim")
-    builder.button(text="🎁 Kunlik Bonus")
-    builder.button(text="👥 Taklifnomalar")
-    builder.button(text="✍️ Adminga yozish")
-    builder.button(text="💳 Balansni to'ldirish")
-    builder.button(text="🧧 Promokod")
-    if uid == ADMIN_ID:
-        builder.button(text="👑 Admin Panel")
-    builder.adjust(2)
-    return builder.as_markup(resize_keyboard=True)
+# ================= 4. KLAVIATURA (UI) TIZIMI =================
+class UI:
+    @staticmethod
+    def main_menu(uid):
+        kb = ReplyKeyboardBuilder()
+        kb.button(text="🎬 Kinolar Ro'yxati")
+        kb.button(text="📥 Kino Qidirish")
+        kb.button(text="💳 Mening Hisobim")
+        kb.button(text="💰 Balans To'ldirish")
+        kb.button(text="🎁 Kunlik Bonus")
+        kb.button(text="☎️ Admin bilan Aloqa")
+        if int(uid) == ADMIN_ID:
+            kb.button(text="👑 Admin Panel")
+        kb.adjust(2)
+        return kb.as_markup(resize_keyboard=True)
 
-def get_admin_kb():
-    builder = InlineKeyboardBuilder()
-    builder.button(text="➕ Kino Qo'shish", callback_data="adm_add_kino")
-    builder.button(text="🗑 Kino O'chirish", callback_data="adm_del_kino")
-    builder.button(text="💬 Jonli Muloqot", callback_data="adm_start_chat")
-    builder.button(text="📢 Reklama (Hamma uchun)", callback_data="adm_broadcast")
-    builder.button(text="📊 To'liq Statistika", callback_data="adm_full_stats")
-    builder.button(text="🚫 Foydalanuvchini bloklash", callback_data="adm_ban")
-    builder.button(text="💰 Balans berish", callback_data="adm_give_money")
-    builder.button(text="❌ Yopish", callback_data="adm_close")
-    builder.adjust(1)
-    return builder.as_markup()
+    @staticmethod
+    def admin_panel():
+        kb = InlineKeyboardBuilder()
+        kb.button(text="➕ Kino Qo'shish", callback_data="adm_add")
+        kb.button(text="❌ Kino O'chirish", callback_data="adm_del")
+        kb.button(text="💰 Coin Berish", callback_data="adm_give")
+        kb.button(text="💸 Coin Olish", callback_data="adm_take")
+        kb.button(text="🚫 Bloklash", callback_data="adm_ban")
+        kb.button(text="📢 Reklama", callback_data="adm_ads")
+        kb.button(text="💬 Jonli Chat", callback_data="adm_chat")
+        kb.adjust(2)
+        return kb.as_markup()
 
-# ================= JONLI MULOQOT (CHAT) MODULI =================
-@dp.callback_query(F.data == "adm_start_chat")
-async def adm_chat_init(c: CallbackQuery, state: FSMContext):
-    await c.message.answer("📝 Bog'lanmoqchi bo'lgan foydalanuvchi ID sini kiriting:")
-    await state.set_state(BotState.admin_chat_target)
-    await c.answer()
+    @staticmethod
+    def chat_confirm():
+        kb = InlineKeyboardBuilder()
+        kb.button(text="✅ Ha, gaplashaman", callback_data="chat_yes")
+        kb.button(text="❌ Yo'q, rad etaman", callback_data="chat_no")
+        kb.adjust(2)
+        return kb.as_markup()
 
-@dp.message(BotState.admin_chat_target)
-async def adm_request_chat(m: Message, state: FSMContext):
-    target_id = m.text
-    if not target_id.isdigit():
-        return await m.answer("⚠️ Faqat raqamli ID kiriting!")
-    
-    kb = InlineKeyboardBuilder()
-    kb.button(text="✅ Ha, gaplashaman", callback_data=f"chat_accept_{m.from_user.id}")
-    kb.button(text="❌ Yo'q, rad etaman", callback_data=f"chat_deny_{m.from_user.id}")
-    
-    try:
-        await bot.send_message(
-            target_id, 
-            f"🔔 **DIQQAT! Admin ({m.from_user.id}) siz bilan jonli suhbat boshlamoqchi.**\nRozimisiz?",
-            reply_markup=kb.as_markup()
-        )
-        await m.answer(f"⏳ So'rov yuborildi. Foydalanuvchi (ID: {target_id}) javobini kuting...")
-        await state.update_data(current_chat_partner=target_id)
-    except Exception as e:
-        await m.answer(f"❌ Xato: Foydalanuvchi botni bloklagan yoki ID xato. {e}")
-    await state.clear()
-
-@dp.callback_query(F.data.startswith("chat_"))
-async def chat_handler(c: CallbackQuery, state: FSMContext):
-    action = c.data.split("_")[1]
-    partner_id = int(c.data.split("_")[2])
-    
-    if action == "accept":
-        await c.message.answer("✅ Suhbat boshlandi! Xabaringizni yozing.\n(Tugatish: /stop)")
-        await bot.send_message(partner_id, f"✅ Foydalanuvchi ({c.from_user.id}) suhbatga kirdi!")
-        
-        # Ikkala tomonni ham holatga solamiz
-        await state.set_state(BotState.in_active_chat)
-        await state.update_data(chat_partner=partner_id)
-        
-        p_state = dp.fsm.resolve_context(bot, partner_id, partner_id)
-        await p_state.set_state(BotState.in_active_chat)
-        await p_state.update_data(chat_partner=c.from_user.id)
-    else:
-        await c.message.answer("❌ Suhbat rad etildi.")
-        await bot.send_message(partner_id, "😔 Foydalanuvchi suhbatni rad etdi.")
-    await c.answer()
-
-@dp.message(BotState.in_active_chat)
-async def chatting_process(m: Message, state: FSMContext):
-    data = await state.get_data()
-    partner = data.get("chat_partner")
-    
-    if m.text == "/stop":
-        await m.answer("📴 Suhbat tugatildi.", reply_markup=get_main_kb(m.from_user.id))
-        if partner:
-            await bot.send_message(partner, "📴 Suhbatdosh aloqani uzdi.", reply_markup=get_main_kb(partner))
-            p_state = dp.fsm.resolve_context(bot, partner, partner)
-            await p_state.clear()
-        await state.clear()
-        return
-
-    try:
-        await bot.send_message(partner, f"💬 **Xabar:**\n\n{m.text}")
-    except:
-        await m.answer("⚠️ Xabar yetkazilmadi. Suhbatdosh botni tark etgan bo'lishi mumkin.")
-
-# ================= ASOSIY BOT FUNKSIYALARI =================
+# ================= 5. START VA RO'YXATDAN O'TISH =================
 @dp.message(CommandStart())
 async def cmd_start(m: Message, state: FSMContext):
-    db = load_db()
+    db = Database.load()
     uid = str(m.from_user.id)
-    
-    # Taklifnoma tekshiruvi
-    args = m.text.split()
-    referrer = args[1] if len(args) > 1 else None
+
+    if uid in db.get("banned", []):
+        return await m.answer("⛔️ Siz bloklangansiz!")
 
     if uid in db["users"]:
-        await m.answer(f"🌟 Xush kelibsiz qaytib, {db['users'][uid]['name']}!", reply_markup=get_main_kb(m.from_user.id))
+        await m.answer(f"🌟 Xush kelibsiz qaytib, {db['users'][uid]['name']}!", reply_markup=UI.main_menu(uid))
     else:
-        await m.answer("👋 **Assalomu alaykum! Botimizga xush kelibsiz.**\nRo'yxatdan o'tish uchun ismingizni yozing:")
-        await state.set_state(BotState.waiting_name)
-        if referrer and referrer != uid:
-            await state.update_data(ref=referrer)
+        await m.answer("👋 Botga xush kelibsiz! Ismingizni kiriting:")
+        await state.set_state(BotState.wait_name)
 
-@dp.message(BotState.waiting_name)
-async def process_name(m: Message, state: FSMContext):
-    if len(m.text) < 3:
-        return await m.answer("⚠️ Ism juda qisqa, qayta kiriting:")
-    await state.update_data(reg_name=m.text)
-    kb = ReplyKeyboardBuilder().button(text="📱 Telefon raqamni yuborish", request_contact=True)
-    await m.answer("📱 Rahmat! Endi telefon raqamingizni pastdagi tugma orqali yuboring:", reply_markup=kb.as_markup(resize_keyboard=True))
-    await state.set_state(BotState.waiting_phone)
+@dp.message(BotState.wait_name)
+async def reg_name(m: Message, state: FSMContext):
+    await state.update_data(name=m.text)
+    kb = ReplyKeyboardBuilder().button(text="📱 Raqamni yuborish", request_contact=True)
+    await m.answer(f"Rahmat {m.text}, raqamingizni yuboring:", reply_markup=kb.as_markup(resize_keyboard=True))
+    await state.set_state(BotState.wait_phone)
 
-@dp.message(BotState.waiting_phone, F.contact)
-async def process_phone(m: Message, state: FSMContext):
+@dp.message(BotState.wait_phone, F.contact)
+async def reg_phone(m: Message, state: FSMContext):
     data = await state.get_data()
-    db = load_db()
+    db = Database.load()
     uid = str(m.from_user.id)
+    
+    # ID Generatsiyasi
+    user_id_code = f"UC{random.randint(1000, 9999)}"
     
     db["users"][uid] = {
-        "name": data["reg_name"],
+        "name": data["name"],
         "phone": m.contact.phone_number,
-        "coins": 100,
-        "vip": False,
-        "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        "purchased": []
+        "balance": 100,
+        "u_id": user_id_code,
+        "movies": [],
+        "joined": datetime.now().strftime("%Y-%m-%d")
     }
-    
-    # Referral tizimi
-    ref = data.get("ref")
-    if ref and ref in db["users"]:
-        db["users"][ref]["coins"] += 50
-        await bot.send_message(ref, "🎁 Siz taklif qilgan do'stingiz ro'yxatdan o'tdi! Sizga 50 coin berildi.")
+    Database.save(db)
 
-    save_db(db)
-    await m.answer(f"🎉 Tabriklaymiz {data['reg_name']}! Sizga 100 coin bonus berildi.", reply_markup=get_main_kb(m.from_user.id))
+    # Adminga habar
+    await bot.send_message(ADMIN_ID, f"🔔 **Yangi foydalanuvchi!**\n👤 Ism: {data['name']}\n🆔 ID: `{uid}`\n🔑 Kod: {user_id_code}\n📞 {m.contact.phone_number}")
+
+    await m.answer(f"🎉 Ro'yxatdan o'tdingiz! Sizga 100 coin berildi.\nSizning ID kodingiz: {user_id_code}", reply_markup=UI.main_menu(uid))
     await state.clear()
 
-# ================= BALANS VA BONUS TIZIMI =================
-@dp.message(F.text == "💰 Hisobim")
-async def show_balance(m: Message):
-    db = load_db()
-    u = db["users"].get(str(m.from_user.id))
-    if not u: return
-    
-    status = "💎 VIP" if u.get("vip") else "👤 Oddiy"
-    text = (
-        f"💳 **HISOB MA'LUMOTLARI**\n"
-        f"━━━━━━━━━━━━━━\n"
-        f"👤 Foydalanuvchi: {u['name']}\n"
-        f"🆔 ID: `{m.from_user.id}`\n"
-        f"💰 Balans: {u['coins']} coin\n"
-        f"🎖 Status: {status}\n"
-        f"📅 Ro'yxatdan o'tgan: {u['date']}\n"
-        f"━━━━━━━━━━━━━━"
-    )
-    await m.answer(text, parse_mode="Markdown")
+# ================= 6. JONLI CHAT TIZIMI (PROFESSIONAL) =================
+@dp.callback_query(F.data == "adm_chat")
+async def adm_chat_start(c: CallbackQuery, state: FSMContext):
+    await c.message.answer("📝 Gaplashmoqchi bo'lgan foydalanuvchi ID sini yozing:")
+    await state.set_state(BotState.adm_chat_target)
 
-@dp.message(F.text == "🎁 Kunlik Bonus")
-async def get_daily_bonus(m: Message):
-    db = load_db()
-    uid = str(m.from_user.id)
-    today = datetime.now().strftime("%Y-%m-%d")
+@dp.message(BotState.adm_chat_target)
+async def adm_chat_req(m: Message, state: FSMContext):
+    target_id = m.text
+    db = Database.load()
+    if target_id not in db["users"]:
+        return await m.answer("❌ Foydalanuvchi topilmadi!")
     
-    if db["daily_bonus"].get(uid) == today:
-        return await m.answer("⚠️ Siz bugun bonus olib bo'lgansiz. Ertaga qaytib keling!")
+    await state.update_data(chat_with=target_id)
+    await m.answer(f"⏳ {target_id} ga so'rov yuborildi. Javobini kuting...")
     
-    amount = random.randint(10, 100)
-    db["users"][uid]["coins"] += amount
-    db["daily_bonus"][uid] = today
-    save_db(db)
-    await m.answer(f"🎁 Kunlik omadingiz! Sizga {amount} coin taqdim etildi!")
+    await bot.send_message(target_id, "🔔 **Admin siz bilan jonli muloqot qilmoqchi.**\nQabul qilasizmi?", reply_markup=UI.chat_confirm())
 
-# ================= KINOLAR BILAN ISHLASH =================
-@dp.message(F.text == "🎬 Kinolar Ro'yxati")
-async def movies_list_cmd(m: Message):
-    db = load_db()
-    if not db["movies"]:
-        return await m.answer("📽 Hozircha bazada kinolar mavjud emas.")
+@dp.callback_query(F.data.startswith("chat_"))
+async def user_chat_res(c: CallbackQuery, state: FSMContext):
+    res = c.data.split("_")[1]
+    db = Database.load()
     
-    text = "🔥 **ENG SO'NGGI KINOLAR** 🔥\n━━━━━━━━━━━━━━\n"
-    for k in db["movies"]:
-        text += f"🎬 **Nomi:** {k['name']}\n📅 **Yili:** {k['year']}\n💰 **Narxi:** {k['price']} coin\n🆔 **Kod:** `{k['id']}`\n──────────────\n"
-    
-    text += "\n🍿 *Sotib olish uchun 'Kino sotib olish' tugmasini bosing!*"
-    await m.answer(text, parse_mode="Markdown")
-
-@dp.message(F.text == "🎟 Kino sotib olish")
-async def buy_movie_start(m: Message, state: FSMContext):
-    await m.answer("🔢 Sotib olmoqchi bo'lgan kinongiz ID kodini yozing:")
-    # Bu yerda maxsus state yaratish mumkin yoki shunchaki xabar kutish
-
-# ================= ADMIN PANEL MODULLARI =================
-@dp.message(F.text == "👑 Admin Panel")
-async def admin_auth_start(m: Message, state: FSMContext):
-    if m.from_user.id != ADMIN_ID: return
-    await m.answer("🔐 Xavfsizlik uchun parolni kiriting:")
-    await state.set_state(BotState.admin_auth)
-
-@dp.message(BotState.admin_auth)
-async def admin_auth_check(m: Message, state: FSMContext):
-    if m.text == ADMIN_PASS:
-        await state.clear()
-        await m.answer("🛡 **Boshqaruv paneli faol.** Kerakli amalni tanlang:", reply_markup=get_admin_kb())
+    if res == "yes":
+        await c.message.edit_text("✅ Muloqot boshlandi. Xabar yozishingiz mumkin.")
+        await bot.send_message(ADMIN_ID, f"✅ Foydalanuvchi ({c.from_user.id}) muloqotni qabul qildi.\nSuhbatni tugatish uchun /stop_chat yozing.")
+        
+        # Har ikki tarafni Active Chat holatiga o'tkazamiz
+        await state.set_state(BotState.active_chat)
+        # Admin holatini ham o'zgartirish kerak (bu yerda soddalashtirilgan)
     else:
-        await m.answer("❌ Parol xato! Qayta urinib ko'ring:")
+        await c.message.edit_text("❌ Rad etildi.")
+        await bot.send_message(ADMIN_ID, f"⚠️ Foydalanuvchi ({c.from_user.id}) muloqotni rad etdi.")
 
-@dp.callback_query(F.data == "adm_full_stats")
-async def admin_stats(c: CallbackQuery):
-    db = load_db()
-    u_count = len(db["users"])
-    m_count = len(db["movies"])
-    orders = db.get("total_orders", 0)
-    
-    text = (
-        f"📊 **BOT STATISTIKASI**\n"
-        f"━━━━━━━━━━━━━━\n"
-        f"👥 Foydalanuvchilar: {u_count} ta\n"
-        f"🎬 Kinolar: {m_count} ta\n"
-        f"💸 Sotuvlar: {orders} ta\n"
-        f"🕒 Server vaqti: {datetime.now().strftime('%H:%M:%S')}\n"
-        f"━━━━━━━━━━━━━━"
-    )
-    await c.message.edit_text(text, reply_markup=get_admin_kb())
+@dp.message(BotState.active_chat)
+async def live_chatting(m: Message, state: FSMContext):
+    if m.text == "/stop_chat":
+        await m.answer("📴 Muloqot yakunlandi.")
+        await bot.send_message(ADMIN_ID if m.from_user.id != ADMIN_ID else "USER_ID", "📴 Admin muloqotni yakunladi.")
+        return await state.clear()
 
-# --- KINO QO'SHISH FUNKSIYALARI ---
-@dp.callback_query(F.data == "adm_add_kino")
-async def adm_k_add(c: CallbackQuery, state: FSMContext):
-    await c.message.answer("🎬 Kino nomini kiriting:")
-    await state.set_state(BotState.adding_k_name)
-    await c.answer()
+    # Xabarni yetkazish logicasi
+    target = ADMIN_ID if m.from_user.id != ADMIN_ID else (await state.get_data())['chat_with']
+    await bot.send_message(target, f"💬 **Yangi xabar:**\n{m.text}")
 
-@dp.message(BotState.adding_k_name)
-async def adm_k_y(m: Message, state: FSMContext):
-    await state.update_data(kname=m.text)
-    await m.answer("📅 Kino yilini kiriting:")
-    await state.set_state(BotState.adding_k_year)
+# ================= 7. KINO BOSHQARUVI (ADD/DEL/SEARCH) =================
+@dp.callback_query(F.data == "adm_add")
+async def adm_add_1(c: CallbackQuery, state: FSMContext):
+    await c.message.answer("🎬 Kino nomi:")
+    await state.set_state(BotState.adm_name)
 
-@dp.message(BotState.adding_k_year)
-async def adm_k_l(m: Message, state: FSMContext):
-    await state.update_data(kyear=m.text)
-    await m.answer("🔗 Kino linkini yozing:")
-    await state.set_state(BotState.adding_k_link)
+@dp.message(BotState.adm_name)
+async def adm_add_2(m: Message, state: FSMContext):
+    await state.update_data(n=m.text)
+    await m.answer("🔢 Kino kodi:")
+    await state.set_state(BotState.adm_code)
 
-@dp.message(BotState.adding_k_link)
-async def adm_k_p(m: Message, state: FSMContext):
-    await state.update_data(klink=m.text)
-    await m.answer("💰 Kino narxini (coin) kiriting:")
-    await state.set_state(BotState.adding_k_price)
+@dp.message(BotState.adm_code)
+async def adm_add_3(m: Message, state: FSMContext):
+    await state.update_data(c=m.text)
+    await m.answer("📅 Yili:")
+    await state.set_state(BotState.adm_year)
 
-@dp.message(BotState.adding_k_price)
-async def adm_k_save(m: Message, state: FSMContext):
-    if not m.text.isdigit():
-        return await m.answer("⚠️ Narxni faqat raqamda yozing!")
-    
+@dp.message(BotState.adm_year)
+async def adm_add_4(m: Message, state: FSMContext):
+    await state.update_data(y=m.text)
+    await m.answer("🌐 Tili:")
+    await state.set_state(BotState.adm_lang)
+
+@dp.message(BotState.adm_lang)
+async def adm_add_5(m: Message, state: FSMContext):
+    await state.update_data(t=m.text)
+    await m.answer("🔗 Link (Havola):")
+    await state.set_state(BotState.adm_link)
+
+@dp.message(BotState.adm_link)
+async def adm_add_6(m: Message, state: FSMContext):
+    await state.update_data(l=m.text)
+    await m.answer("💰 Narxi (Coin):")
+    await state.set_state(BotState.adm_price)
+
+@dp.message(BotState.adm_price)
+async def adm_add_final(m: Message, state: FSMContext):
     data = await state.get_data()
-    db = load_db()
-    kid = len(db["movies"]) + 101
-    
+    db = Database.load()
     db["movies"].append({
-        "id": kid,
-        "name": data["kname"],
-        "year": data["kyear"],
-        "link": data["klink"],
-        "price": int(m.text)
+        "name": data['n'], "code": data['c'], "year": data['y'], 
+        "lang": data['t'], "link": data['l'], "price": int(m.text)
     })
-    save_db(db)
-    await m.answer(f"✅ Kino saqlandi! ID: {kid}", reply_markup=get_admin_kb())
+    Database.save(db)
+    await m.answer("✅ Kino qo'shildi!")
     await state.clear()
 
-# ================= XAVFSIZLIK VA YAKUNLASH =================
-@dp.message(F.text == "❌ Yopish")
-async def close_kb(m: Message):
-    await m.answer("Menyu yopildi.", reply_markup=ReplyKeyboardRemove())
+@dp.message(F.text == "🎬 Kinolar Ro'yxati")
+async def user_movies(m: Message):
+    db = Database.load()
+    if not db["movies"]: return await m.answer("Hozircha bo'sh.")
+    
+    res = "🎬 **Kinolar ro'yxati:**\n\n"
+    for k in db["movies"]:
+        res += f"🎥 **{k['name']}**\n🏷 Kod: `{k['code']}` | 📅 {k['year']}\n🌐 Til: {k['lang']} | 💰 {k['price']} coin\n"
+        res += "----------------------\n"
+    await m.answer(res)
 
-async def main_setup():
-    # Renderda ishlash uchun Flaskni boshlaymiz
-    keep_alive()
-    logger.info("BOT TIZIMI ISHGA TUSHDI...")
-    
-    # Eskirgan webhooklarni tozalaymiz
+# ================= 8. COIN VA BALANS BOSHQARUVI =================
+@dp.callback_query(F.data == "adm_give")
+async def adm_give_init(c: CallbackQuery, state: FSMContext):
+    await c.message.answer("🆔 Foydalanuvchi ID sini yozing:")
+    await state.set_state(BotState.adm_give_id)
+
+@dp.message(BotState.adm_give_id)
+async def adm_give_1(m: Message, state: FSMContext):
+    await state.update_data(target=m.text)
+    await m.answer("💰 Miqdorni yozing:")
+    await state.set_state(BotState.adm_give_amount)
+
+@dp.message(BotState.adm_give_amount)
+async def adm_give_final(m: Message, state: FSMContext):
+    data = await state.get_data()
+    db = Database.load()
+    uid = data['target']
+    if uid in db["users"]:
+        db["users"][uid]["balance"] += int(m.text)
+        Database.save(db)
+        await m.answer("✅ Coin berildi!")
+        await bot.send_message(uid, f"🎁 Admin sizga {m.text} coin berdi!")
+    await state.clear()
+
+@dp.message(F.text == "💳 Mening Hisobim")
+async def user_acc(m: Message):
+    db = Database.load()
+    u = db["users"].get(str(m.from_user.id))
+    if u:
+        await m.answer(f"👤 **Profilingiz:**\n\n🆔 Kod: {u['u_id']}\n💰 Balans: {u['balance']} coin\n🎬 Xaridlar: {len(u['movies'])} ta")
+
+# ================= 9. REKLAMA VA BLOKLASH =================
+@dp.callback_query(F.data == "adm_ads")
+async def adm_ads_start(c: CallbackQuery, state: FSMContext):
+    await c.message.answer("📢 Reklama matnini yuboring:")
+    await state.set_state(BotState.adm_broadcast)
+
+@dp.message(BotState.adm_broadcast)
+async def adm_ads_exec(m: Message, state: FSMContext):
+    db = Database.load()
+    count = 0
+    for uid in db["users"]:
+        try:
+            await m.copy_to(uid)
+            count += 1
+            await asyncio.sleep(0.1)
+        except: continue
+    await m.answer(f"✅ {count} kishiga yuborildi.")
+    await state.clear()
+
+# ================= 10. ISHGA TUSHIRISH =================
+async def main():
+    Database.initialize()
+    Thread(target=run_flask, daemon=True).start()
     await bot.delete_webhook(drop_pending_updates=True)
-    
-    # Pollingni boshlash
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main_setup())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("BOT TO'XTATILDI.")
+        asyncio.run(main())
+    except:
+        print("Xatolik yuz berdi!")
