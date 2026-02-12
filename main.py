@@ -26,7 +26,7 @@ from aiogram.types import (
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 
 # ================= KONFIGURATSIYA =================
-TOKEN = "8366692220:AAFxf6YFAa9SqmjL04pd7dmLn1oMs1W6w7U"
+TOKEN = "8366692220:AAHaJhbqksDOn_TgDp645GIliCT__4yZlUk"
 ADMIN_ID = 7492227388 
 ADMIN_PASS = "456"
 DB_FILE = "database.json"
