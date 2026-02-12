@@ -347,13 +347,21 @@ async def process_buy(m: Message, state: FSMContext):
         await state.clear()
         await m.answer(
             f"✅ Siz *{movie['name']}* kinoni allaqachon sotib olgansiz!\n\n"
-            "🎬 Quyidagi havoladan tomosha qiling:",
+            "🎬 Quyidagi tugmadan tomosha qiling:",
             parse_mode="Markdown"
         )
         if movie['file_id']:
             # Link yoki fayl ID tekshirish
             if movie['file_id'].startswith('http'):
-                await m.answer(f"🔗 Link: {movie['file_id']}")
+                # Link uchun tugma yaratish
+                kb = InlineKeyboardBuilder()
+                kb.button(text="🎬 Kinoni Tomosha Qilish", url=movie['file_id'])
+                
+                await m.answer(
+                    f"🎬 *{movie['name']}*",
+                    reply_markup=kb.as_markup(),
+                    parse_mode="Markdown"
+                )
             else:
                 await bot.send_video(m.from_user.id, movie['file_id'], caption=f"🎬 {movie['name']}")
         return
@@ -402,9 +410,15 @@ async def confirm_purchase(c: CallbackQuery):
         if movie['file_id']:
             # Link yoki fayl ID tekshirish
             if movie['file_id'].startswith('http'):
+                # Link uchun tugma yaratish
+                kb = InlineKeyboardBuilder()
+                kb.button(text="🎬 Kinoni Tomosha Qilish", url=movie['file_id'])
+                
                 await bot.send_message(
                     c.from_user.id,
-                    f"🎬 *{movie['name']}* ({movie['year']})\n\n🔗 Kino linki:\n{movie['file_id']}",
+                    f"🎬 *{movie['name']}* ({movie['year']})\n\n"
+                    f"✅ Kino tayyor! Quyidagi tugmani bosib tomosha qiling:",
+                    reply_markup=kb.as_markup(),
                     parse_mode="Markdown"
                 )
             else:
