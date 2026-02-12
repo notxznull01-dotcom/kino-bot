@@ -22,6 +22,7 @@ from aiogram.types import (
 
 # ================= KONFIGURATSIYA =================
 # Botingiz sozlamalari
+# SIZ SO'RAGAN YANGI TOKEN JOYLANDI
 TOKEN = "8366692220:AAFxf6YFAa9SqmjL04pd7dmLn1oMs1W6w7U"
 ADMIN_ID = 7492227388 
 ADMIN_PASS = "456"
