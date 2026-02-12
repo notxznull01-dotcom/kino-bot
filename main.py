@@ -182,6 +182,11 @@ class BotState(StatesGroup):
     unblocking_id = State()
     admin_chat_target = State()
     in_active_chat = State()
+    # YANGI: Coin boshqaruv holatlari
+    add_coin_id = State()
+    add_coin_amount = State()
+    remove_coin_id = State()
+    remove_coin_amount = State()
 
 # ================= KLAVIATURALAR =================
 def get_main_kb(uid: int):
@@ -202,6 +207,8 @@ def get_admin_kb():
     builder = InlineKeyboardBuilder()
     builder.button(text="➕ Kino Qo'shish", callback_data="adm_add_kino")
     builder.button(text="🗑 Kino O'chirish", callback_data="adm_del_kino")
+    builder.button(text="💰 Coin Qo'shish", callback_data="adm_add_coin")
+    builder.button(text="💸 Coin Olish", callback_data="adm_remove_coin")
     builder.button(text="📢 Reklama Yuborish", callback_data="adm_broadcast")
     builder.button(text="🚫 Foydalanuvchi Bloklash", callback_data="adm_ban")
     builder.button(text="✅ Blokdan Chiqarish", callback_data="adm_unban")
@@ -596,6 +603,156 @@ async def full_stats(c: CallbackQuery):
         reply_markup=get_admin_kb()
     )
     await c.answer()
+
+# ================= COIN QO'SHISH (YANGI) =================
+@dp.callback_query(F.data == "adm_add_coin")
+async def add_coin_start(c: CallbackQuery, state: FSMContext):
+    if c.from_user.id != ADMIN_ID:
+        return await c.answer("❌ Ruxsat yo'q!", show_alert=True)
+    await c.message.answer("💰 *Coin qo'shish*\n\nFoydalanuvchi *ID* sini kiriting:", parse_mode="Markdown")
+    await state.set_state(BotState.add_coin_id)
+    await c.answer()
+
+@dp.message(BotState.add_coin_id)
+async def add_coin_get_id(m: Message, state: FSMContext):
+    if not m.text.isdigit():
+        return await m.answer("⚠️ Faqat ID raqamini kiriting!")
+    
+    user_id = int(m.text)
+    user = await get_user(user_id)
+    
+    if not user:
+        await state.clear()
+        return await m.answer("❌ Bunday foydalanuvchi topilmadi!")
+    
+    await state.update_data(target_user_id=user_id)
+    await m.answer(
+        f"👤 *Foydalanuvchi:* {user['name']}\n"
+        f"💰 *Joriy balans:* {user['coins']} coin\n\n"
+        f"Qancha coin qo'shmoqchisiz?",
+        parse_mode="Markdown"
+    )
+    await state.set_state(BotState.add_coin_amount)
+
+@dp.message(BotState.add_coin_amount)
+async def add_coin_process(m: Message, state: FSMContext):
+    if not m.text.isdigit() or int(m.text) <= 0:
+        return await m.answer("⚠️ Faqat musbat son kiriting!")
+    
+    data = await state.get_data()
+    user_id = data['target_user_id']
+    amount = int(m.text)
+    
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET coins = coins + $1 WHERE user_id=$2",
+            amount, user_id
+        )
+    
+    updated_user = await get_user(user_id)
+    await state.clear()
+    
+    await m.answer(
+        f"✅ *Coin muvaffaqiyatli qo'shildi!*\n\n"
+        f"👤 Foydalanuvchi ID: `{user_id}`\n"
+        f"➕ Qo'shildi: *+{amount} coin*\n"
+        f"💰 Yangi balans: *{updated_user['coins']} coin*",
+        parse_mode="Markdown",
+        reply_markup=get_admin_kb()
+    )
+    
+    # Foydalanuvchiga xabar yuborish
+    try:
+        await bot.send_message(
+            user_id,
+            f"🎉 *Tabriklaymiz!*\n\n"
+            f"Sizga *+{amount} coin* qo'shildi!\n"
+            f"💰 Yangi balans: *{updated_user['coins']} coin*",
+            parse_mode="Markdown"
+        )
+    except:
+        pass
+
+# ================= COIN OLISH (YANGI) =================
+@dp.callback_query(F.data == "adm_remove_coin")
+async def remove_coin_start(c: CallbackQuery, state: FSMContext):
+    if c.from_user.id != ADMIN_ID:
+        return await c.answer("❌ Ruxsat yo'q!", show_alert=True)
+    await c.message.answer("💸 *Coin olish*\n\nFoydalanuvchi *ID* sini kiriting:", parse_mode="Markdown")
+    await state.set_state(BotState.remove_coin_id)
+    await c.answer()
+
+@dp.message(BotState.remove_coin_id)
+async def remove_coin_get_id(m: Message, state: FSMContext):
+    if not m.text.isdigit():
+        return await m.answer("⚠️ Faqat ID raqamini kiriting!")
+    
+    user_id = int(m.text)
+    user = await get_user(user_id)
+    
+    if not user:
+        await state.clear()
+        return await m.answer("❌ Bunday foydalanuvchi topilmadi!")
+    
+    await state.update_data(target_user_id=user_id)
+    await m.answer(
+        f"👤 *Foydalanuvchi:* {user['name']}\n"
+        f"💰 *Joriy balans:* {user['coins']} coin\n\n"
+        f"Qancha coin olmoqchisiz?",
+        parse_mode="Markdown"
+    )
+    await state.set_state(BotState.remove_coin_amount)
+
+@dp.message(BotState.remove_coin_amount)
+async def remove_coin_process(m: Message, state: FSMContext):
+    if not m.text.isdigit() or int(m.text) <= 0:
+        return await m.answer("⚠️ Faqat musbat son kiriting!")
+    
+    data = await state.get_data()
+    user_id = data['target_user_id']
+    amount = int(m.text)
+    
+    user = await get_user(user_id)
+    
+    if user['coins'] < amount:
+        await state.clear()
+        return await m.answer(
+            f"⚠️ *Foydalanuvchida coin yetarli emas!*\n\n"
+            f"💰 Foydalanuvchi balansi: {user['coins']} coin\n"
+            f"💸 Olmoqchi bo'lgan: {amount} coin",
+            parse_mode="Markdown",
+            reply_markup=get_admin_kb()
+        )
+    
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET coins = coins - $1 WHERE user_id=$2",
+            amount, user_id
+        )
+    
+    updated_user = await get_user(user_id)
+    await state.clear()
+    
+    await m.answer(
+        f"✅ *Coin muvaffaqiyatli olindi!*\n\n"
+        f"👤 Foydalanuvchi ID: `{user_id}`\n"
+        f"➖ Olindi: *-{amount} coin*\n"
+        f"💰 Yangi balans: *{updated_user['coins']} coin*",
+        parse_mode="Markdown",
+        reply_markup=get_admin_kb()
+    )
+    
+    # Foydalanuvchiga xabar yuborish
+    try:
+        await bot.send_message(
+            user_id,
+            f"⚠️ *E'tibor!*\n\n"
+            f"Sizdan *-{amount} coin* yechildi!\n"
+            f"💰 Yangi balans: *{updated_user['coins']} coin*",
+            parse_mode="Markdown"
+        )
+    except:
+        pass
 
 # --- KINO QO'SHISH ---
 @dp.callback_query(F.data == "adm_add_kino")
