@@ -20,10 +20,10 @@ from aiogram.types import (
 )
 
 # ================= KONFIGURATSIYA =================
-TOKEN = os.environ.get("BOT_TOKEN", "8366692220:AAHaJhbqksDOn_TgDp645GIliCT__4yZlUk")
+TOKEN = os.environ.get("BOT_TOKEN", "8366692220:AAHKoIz6A__Ll1V5yvcjcjWVaFr5Xcf9HQQ")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "7492227388"))
-ADMIN_PASS = os.environ.get("ADMIN_PASS", "4560")
-DATABASE_URL = os.environ.get("DATABASE_URL", "")  # Render PostgreSQL URL
+ADMIN_PASS = os.environ.get("ADMIN_PASS", "456")
+DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://kino_bot_db_duf5_user:MNiazQVid4iljB2dvN7LeJ8XfYFdnaJQ@dpg-d672bp8gjchc738fpdm0-a/kino_bot_db_duf5")  # Render PostgreSQL URL
 
 # ================= FLASK (RENDER UCHUN) =================
 app = Flask('')
