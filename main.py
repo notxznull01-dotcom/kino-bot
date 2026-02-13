@@ -21,7 +21,7 @@ from aiogram.types import (
 
 # ================= KONFIGURATSIYA =================
 TOKEN = os.environ.get("BOT_TOKEN", "8366692220:AAHKoIz6A__Ll1V5yvcjcjWVaFr5Xcf9HQQ")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "A7492227388"))
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "7492227388"))
 ADMIN_PASS = os.environ.get("ADMIN_PASS", "456")
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://kino_bot_db_duf5_user:MNiazQVid4iljB2dvN7LeJ8XfYFdnaJQ@dpg-d672bp8gjchc738fpdm0-a/kino_bot_db_duf5")  # Render PostgreSQL URL
 
@@ -68,7 +68,8 @@ async def init_db():
                 referrer_id BIGINT DEFAULT NULL,
                 joined_at DATE DEFAULT CURRENT_DATE,
                 last_bonus DATE DEFAULT NULL,
-                is_banned BOOLEAN DEFAULT FALSE
+                is_banned BOOLEAN DEFAULT FALSE,
+                has_subscribed BOOLEAN DEFAULT FALSE
             )
         """)
         await conn.execute("""
@@ -89,6 +90,20 @@ async def init_db():
                 movie_id INTEGER,
                 bought_at TIMESTAMP DEFAULT NOW()
             )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS bot_settings (
+                id INTEGER PRIMARY KEY DEFAULT 1,
+                subscription_link TEXT,
+                subscription_name TEXT,
+                subscription_required BOOLEAN DEFAULT FALSE
+            )
+        """)
+        # Default sozlamalar
+        await conn.execute("""
+            INSERT INTO bot_settings (id, subscription_required) 
+            VALUES (1, FALSE) 
+            ON CONFLICT (id) DO NOTHING
         """)
     logger.info("✅ Baza tayyor!")
 
@@ -166,6 +181,31 @@ async def get_stats():
             "today_users": today_users
         }
 
+# YANGI: Obuna sozlamalari
+async def get_subscription_settings():
+    async with db_pool.acquire() as conn:
+        return await conn.fetchrow("SELECT * FROM bot_settings WHERE id=1")
+
+async def set_subscription(link: str, name: str):
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE bot_settings SET subscription_link=$1, subscription_name=$2, subscription_required=TRUE WHERE id=1",
+            link, name
+        )
+
+async def disable_subscription():
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE bot_settings SET subscription_required=FALSE WHERE id=1"
+        )
+
+async def mark_user_subscribed(user_id: int):
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET has_subscribed=TRUE WHERE user_id=$1",
+            user_id
+        )
+
 # ================= FSM HOLATLAR =================
 class BotState(StatesGroup):
     waiting_name = State()
@@ -186,6 +226,9 @@ class BotState(StatesGroup):
     add_coin_amount = State()
     remove_coin_id = State()
     remove_coin_amount = State()
+    # YANGI: Majburiy obuna
+    setting_sub_link = State()
+    setting_sub_name = State()
 
 # ================= KLAVIATURALAR =================
 def get_main_kb(uid: int):
@@ -195,6 +238,7 @@ def get_main_kb(uid: int):
     builder.button(text="💰 Hisobim")
     builder.button(text="🎁 Kunlik Bonus")
     builder.button(text="👥 Do'st Taklif Qilish")
+    builder.button(text="📥 Video Yuklab Olish")
     builder.button(text="✍️ Adminga Yozish")
     if uid == ADMIN_ID:
         builder.button(text="👑 Admin Panel")
@@ -212,6 +256,8 @@ def get_admin_kb():
     builder.button(text="🚫 Foydalanuvchi Bloklash", callback_data="adm_ban")
     builder.button(text="✅ Blokdan Chiqarish", callback_data="adm_unban")
     builder.button(text="💬 Foydalanuvchi bilan Gaplash", callback_data="adm_start_chat")
+    builder.button(text="🔔 Majburiy Obuna O'rnatish", callback_data="adm_set_subscription")
+    builder.button(text="🚫 Obunani O'chirish", callback_data="adm_disable_subscription")
     builder.button(text="📊 To'liq Statistika", callback_data="adm_full_stats")
     builder.button(text="❌ Yopish", callback_data="adm_close")
     builder.adjust(2)
@@ -237,6 +283,11 @@ async def start_cmd(m: Message, state: FSMContext):
     if user:
         if user['is_banned']:
             return await m.answer("🚫 Siz botdan bloklangansiz.")
+        
+        # Obuna tekshiruvi
+        if not await check_subscription_required(m.from_user.id):
+            return await show_subscription_prompt(m)
+        
         await m.answer(
             f"🌟 *Xush kelibsiz qaytib, {user['name']}!*\n\n"
             f"💰 Balansingiz: *{user['coins']} coin*",
@@ -303,6 +354,10 @@ async def reg_skip_phone(m: Message, state: FSMContext):
 # ================= KINOLAR RO'YXATI =================
 @dp.message(F.text == "🎬 Kinolar Ro'yxati")
 async def show_movies(m: Message):
+    # Obuna tekshiruvi
+    if not await check_subscription_required(m.from_user.id):
+        return await show_subscription_prompt(m)
+    
     movies = await get_all_movies()
     if not movies:
         return await m.answer("📽 Hozircha bazada kinolar mavjud emas.")
@@ -321,6 +376,10 @@ async def show_movies(m: Message):
 # ================= KINO SOTIB OLISH =================
 @dp.message(F.text == "🎟 Kino Sotib Olish")
 async def buy_movie_start(m: Message, state: FSMContext):
+    # Obuna tekshiruvi
+    if not await check_subscription_required(m.from_user.id):
+        return await show_subscription_prompt(m)
+    
     user = await get_user(m.from_user.id)
     if not user:
         return await m.answer("❌ Avval ro'yxatdan o'ting! /start")
@@ -1044,3 +1103,226 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Bot to'xtatildi.")
+
+# ================= MAJBURIY OBUNA SOZLAMALARI =================
+async def check_subscription_required(user_id: int):
+    """Obuna majburiyligini tekshirish"""
+    settings = await get_subscription_settings()
+    if not settings['subscription_required']:
+        return True
+    
+    user = await get_user(user_id)
+    if user and user['has_subscribed']:
+        return True
+    
+    return False
+
+async def show_subscription_prompt(message: Message):
+    """Obuna xabarini ko'rsatish"""
+    settings = await get_subscription_settings()
+    
+    kb = InlineKeyboardBuilder()
+    kb.button(text=f"📱 {settings['subscription_name']}", url=settings['subscription_link'])
+    kb.button(text="✅ Obunani Tekshirish", callback_data="check_sub")
+    kb.adjust(1)
+    
+    await message.answer(
+        f"🔔 *Botdan foydalanish uchun obuna bo'ling!*\n\n"
+        f"📱 *{settings['subscription_name']}*\n\n"
+        f"1️⃣ Yuqoridagi tugmani bosib obuna bo'ling\n"
+        f"2️⃣ Obuna bo'lgandan keyin *✅ Obunani Tekshirish* ni bosing\n\n"
+        f"❗️ Obuna bo'lmasdan bot ishlamaydi!",
+        reply_markup=kb.as_markup(),
+        parse_mode="Markdown"
+    )
+
+# Obuna tekshirish callback
+@dp.callback_query(F.data == "check_sub")
+async def verify_subscription(c: CallbackQuery):
+    await mark_user_subscribed(c.from_user.id)
+    await c.message.edit_text(
+        "✅ *Rahmat! Obuna tasdiqlandi!*\n\n"
+        "Endi botdan to'liq foydalanishingiz mumkin! 🎉",
+        parse_mode="Markdown"
+    )
+    await c.message.answer(
+        "🎬 Asosiy menyuga o'tish uchun /start bosing",
+    )
+    await c.answer("✅ Obuna tasdiqlandi!")
+
+# ================= ADMIN: OBUNA O'RNATISH =================
+@dp.callback_query(F.data == "adm_set_subscription")
+async def set_subscription_start(c: CallbackQuery, state: FSMContext):
+    if c.from_user.id != ADMIN_ID:
+        return await c.answer("❌ Ruxsat yo'q!", show_alert=True)
+    await c.message.answer(
+        "🔗 *Obuna bo'lish uchun LINK kiriting:*\n\n"
+        "Masalan:\n"
+        "• Instagram: https://instagram.com/your_account\n"
+        "• Telegram: https://t.me/your_channel\n"
+        "• TikTok: https://tiktok.com/@your_account\n"
+        "• YouTube: https://youtube.com/@your_channel",
+        parse_mode="Markdown"
+    )
+    await state.set_state(BotState.setting_sub_link)
+    await c.answer()
+
+@dp.message(BotState.setting_sub_link)
+async def save_sub_link(m: Message, state: FSMContext):
+    if not (m.text.startswith('http://') or m.text.startswith('https://')):
+        return await m.answer("⚠️ Iltimos, to'g'ri link kiriting (http:// yoki https:// bilan)")
+    
+    await state.update_data(sub_link=m.text)
+    await m.answer(
+        "📝 *Obuna nomini kiriting:*\n\n"
+        "Masalan:\n"
+        "• Mening Instagram Sahifam\n"
+        "• Telegram Kanalim\n"
+        "• TikTok Akkauntim",
+        parse_mode="Markdown"
+    )
+    await state.set_state(BotState.setting_sub_name)
+
+@dp.message(BotState.setting_sub_name)
+async def save_sub_name(m: Message, state: FSMContext):
+    data = await state.get_data()
+    await set_subscription(data['sub_link'], m.text)
+    await state.clear()
+    
+    # Barcha foydalanuvchilarni obuna bo'lmagan qilib belgilash
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE users SET has_subscribed=FALSE")
+    
+    await m.answer(
+        f"✅ *Majburiy obuna muvaffaqiyatli o'rnatildi!*\n\n"
+        f"📱 Nom: *{m.text}*\n"
+        f"🔗 Link: `{data['sub_link']}`\n\n"
+        f"Endi barcha foydalanuvchilar botdan foydalanish uchun obuna bo'lishlari kerak!",
+        reply_markup=get_admin_kb(),
+        parse_mode="Markdown"
+    )
+
+# ================= ADMIN: OBUNANI O'CHIRISH =================
+@dp.callback_query(F.data == "adm_disable_subscription")
+async def disable_sub(c: CallbackQuery):
+    if c.from_user.id != ADMIN_ID:
+        return await c.answer("❌ Ruxsat yo'q!", show_alert=True)
+    
+    await disable_subscription()
+    await c.message.edit_text(
+        "✅ *Majburiy obuna o'chirildi!*\n\n"
+        "Endi barcha foydalanuvchilar obuna bo'lmasdan ham botdan foydalanishlari mumkin.",
+        reply_markup=get_admin_kb(),
+        parse_mode="Markdown"
+    )
+    await c.answer("✅ Obuna o'chirildi!")
+
+# ================= VIDEO YUKLOVCHI =================
+@dp.message(F.text)
+async def video_downloader(m: Message):
+    """Video link yuborilsa yuklab berish"""
+    # Faqat URL bo'lgan xabarlar uchun
+    if not (m.text.startswith('http://') or m.text.startswith('https://')):
+        return
+    
+    # Obuna tekshiruvi
+    if not await check_subscription_required(m.from_user.id):
+        return await show_subscription_prompt(m)
+    
+    # TikTok, Instagram, YouTube linklar uchun
+    supported_sites = ['tiktok.com', 'instagram.com', 'youtube.com', 'youtu.be']
+    if not any(site in m.text.lower() for site in supported_sites):
+        return
+    
+    status_msg = await m.answer("⏳ *Video yuklanmoqda...*\n\nBir oz kuting, video tayyorlanmoqda!", parse_mode="Markdown")
+    
+    try:
+        # Video yuklab olish (siz Render'da yt-dlp o'rnatishingiz kerak)
+        import subprocess
+        import tempfile
+        import os
+        
+        # Vaqtinchalik fayl
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as temp_file:
+            temp_path = temp_file.name
+        
+        # yt-dlp bilan yuklab olish (siz serverda o'rnatishingiz kerak)
+        cmd = [
+            'yt-dlp',
+            '-f', 'best[ext=mp4][filesize<50M]/best[filesize<50M]',
+            '--no-warnings',
+            '-o', temp_path,
+            m.text
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+        
+        if result.returncode == 0 and os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
+            # Video yuborish
+            await status_msg.edit_text("📤 *Video yuborilmoqda...*", parse_mode="Markdown")
+            
+            with open(temp_path, 'rb') as video:
+                await bot.send_video(
+                    m.from_user.id,
+                    video,
+                    caption="✅ *Video muvaffaqiyatli yuklandi!*\n\n🤖 @YourBotUsername orqali yuklandi",
+                    parse_mode="Markdown"
+                )
+            
+            await status_msg.delete()
+            os.remove(temp_path)
+        else:
+            await status_msg.edit_text(
+                "❌ *Video yuklab bo'lmadi!*\n\n"
+                "Iltimos:\n"
+                "• Link to'g'riligini tekshiring\n"
+                "• Video ochiq (private emas) ekanligiga ishonch hosil qiling\n"
+                "• Video hajmi 50MB dan kichik bo'lishi kerak",
+                parse_mode="Markdown"
+            )
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+                
+    except subprocess.TimeoutExpired:
+        await status_msg.edit_text(
+            "⏱ *Vaqt tugadi!*\n\n"
+            "Video juda katta yoki serverda muammo bor. Qayta urinib ko'ring.",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.error(f"Video yuklab olishda xatolik: {e}")
+        await status_msg.edit_text(
+            "❌ *Xatolik yuz berdi!*\n\n"
+            "Serverda texnik muammo. Keyinroq urinib ko'ring.",
+            parse_mode="Markdown"
+        )
+
+
+# ================= VIDEO YUKLAB OLISH BO'LIMI =================
+@dp.message(F.text == "📥 Video Yuklab Olish")
+async def video_download_info(m: Message):
+    """Video yuklab olish yo'riqnomasi"""
+    # Obuna tekshiruvi
+    if not await check_subscription_required(m.from_user.id):
+        return await show_subscription_prompt(m)
+    
+    await m.answer(
+        "📥 *VIDEO YUKLAB OLISH*\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "🎬 Quyidagi platformalardan video yuklab oling:\n\n"
+        "✅ TikTok\n"
+        "✅ Instagram (Reels, Posts, Stories)\n"
+        "✅ YouTube (Shorts, Videos)\n\n"
+        "📝 *Qanday ishlatish:*\n"
+        "1️⃣ TikTok, Instagram yoki YouTube'dan video linkini nusxalang\n"
+        "2️⃣ Linkni shu yerga yuboring\n"
+        "3️⃣ Bot avtomatik yuklab beradi!\n\n"
+        "⚠️ *Eslatma:*\n"
+        "• Video hajmi 50MB gacha bo'lishi kerak\n"
+        "• Private/yopiq videolarni yuklab bo'lmaydi\n\n"
+        "💡 *Masalan:*\n"
+        "`https://www.tiktok.com/@user/video/123456`\n"
+        "`https://www.instagram.com/reel/ABC123/`\n"
+        "`https://youtube.com/shorts/xyz789`",
+        parse_mode="Markdown"
+    )
