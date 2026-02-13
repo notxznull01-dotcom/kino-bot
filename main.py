@@ -23,7 +23,7 @@ from aiogram.types import (
 TOKEN = os.environ.get("BOT_TOKEN", "8366692220:AAHKoIz6A__Ll1V5yvcjcjWVaFr5Xcf9HQQ")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "7492227388"))
 ADMIN_PASS = os.environ.get("ADMIN_PASS", "456")
-DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://kino_bot_db_duf5_user:MNiazQVid4iljB2dvN7LeJ8XfYFdnaJQ@dpg-d672bp8gjchc738fpdm0-a/kino_bot_db_duf5")
+DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://kino_bot_db_duf5_user:MNiazQVid4iljB2dvN7LeJ8XfYFdnaJQ@dpg-d672bp8gjchc738fpdm0-a/kino_bot_db_duf5")  # Render PostgreSQL URL
 
 # ================= FLASK (RENDER UCHUN) =================
 app = Flask('')
@@ -68,8 +68,7 @@ async def init_db():
                 referrer_id BIGINT DEFAULT NULL,
                 joined_at DATE DEFAULT CURRENT_DATE,
                 last_bonus DATE DEFAULT NULL,
-                is_banned BOOLEAN DEFAULT FALSE,
-                has_subscribed BOOLEAN DEFAULT FALSE
+                is_banned BOOLEAN DEFAULT FALSE
             )
         """)
         await conn.execute("""
@@ -91,18 +90,6 @@ async def init_db():
                 bought_at TIMESTAMP DEFAULT NOW()
             )
         """)
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS bot_settings (
-                id INTEGER PRIMARY KEY DEFAULT 1,
-                subscription_link TEXT,
-                subscription_name TEXT,
-                subscription_required BOOLEAN DEFAULT FALSE
-            )
-        """)
-        await conn.execute("""
-            INSERT INTO bot_settings (id, subscription_required) 
-            VALUES (1, FALSE) ON CONFLICT (id) DO NOTHING
-        """)
     logger.info("✅ Baza tayyor!")
 
 # ================= BAZA YORDAMCHI FUNKSIYALAR =================
@@ -117,6 +104,7 @@ async def create_user(user_id: int, name: str, phone: str = None, referrer_id: i
             VALUES ($1, $2, $3, 100, $4)
             ON CONFLICT (user_id) DO NOTHING
         """, user_id, name, phone, referrer_id)
+        # Referal bonus
         if referrer_id:
             await conn.execute(
                 "UPDATE users SET coins = coins + 50 WHERE user_id=$1", referrer_id
@@ -178,56 +166,6 @@ async def get_stats():
             "today_users": today_users
         }
 
-# ================= YANGI: OBUNA FUNKSIYALARI =================
-async def get_subscription_settings():
-    async with db_pool.acquire() as conn:
-        return await conn.fetchrow("SELECT * FROM bot_settings WHERE id=1")
-
-async def set_subscription(link: str, name: str):
-    async with db_pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE bot_settings SET subscription_link=$1, subscription_name=$2, subscription_required=TRUE WHERE id=1",
-            link, name
-        )
-
-async def disable_subscription():
-    async with db_pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE bot_settings SET subscription_required=FALSE WHERE id=1"
-        )
-
-async def mark_user_subscribed(user_id: int):
-    async with db_pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE users SET has_subscribed=TRUE WHERE user_id=$1",
-            user_id
-        )
-
-async def check_subscription_required(user_id: int):
-    settings = await get_subscription_settings()
-    if not settings['subscription_required']:
-        return True
-    user = await get_user(user_id)
-    if user and user['has_subscribed']:
-        return True
-    return False
-
-async def show_subscription_prompt(message: Message):
-    settings = await get_subscription_settings()
-    kb = InlineKeyboardBuilder()
-    kb.button(text=f"📱 {settings['subscription_name']}", url=settings['subscription_link'])
-    kb.button(text="✅ Tekshirish", callback_data="check_sub")
-    kb.adjust(1)
-    await message.answer(
-        f"🔔 *Botdan foydalanish uchun obuna bo'ling!*\n\n"
-        f"📱 *{settings['subscription_name']}*\n\n"
-        f"1️⃣ Yuqoridagi tugmani bosib obuna bo'ling\n"
-        f"2️⃣ Obuna bo'lgandan keyin *✅ Tekshirish* bosing\n\n"
-        f"❗️ Obuna bo'lmasdan bot ishlamaydi!",
-        reply_markup=kb.as_markup(),
-        parse_mode="Markdown"
-    )
-
 # ================= FSM HOLATLAR =================
 class BotState(StatesGroup):
     waiting_name = State()
@@ -248,9 +186,6 @@ class BotState(StatesGroup):
     add_coin_amount = State()
     remove_coin_id = State()
     remove_coin_amount = State()
-    # YANGI
-    setting_sub_link = State()
-    setting_sub_name = State()
 
 # ================= KLAVIATURALAR =================
 def get_main_kb(uid: int):
@@ -260,7 +195,6 @@ def get_main_kb(uid: int):
     builder.button(text="💰 Hisobim")
     builder.button(text="🎁 Kunlik Bonus")
     builder.button(text="👥 Do'st Taklif Qilish")
-    builder.button(text="📥 Video Yuklab Olish")
     builder.button(text="✍️ Adminga Yozish")
     if uid == ADMIN_ID:
         builder.button(text="👑 Admin Panel")
@@ -278,8 +212,6 @@ def get_admin_kb():
     builder.button(text="🚫 Foydalanuvchi Bloklash", callback_data="adm_ban")
     builder.button(text="✅ Blokdan Chiqarish", callback_data="adm_unban")
     builder.button(text="💬 Foydalanuvchi bilan Gaplash", callback_data="adm_start_chat")
-    builder.button(text="🔔 Majburiy Obuna", callback_data="adm_set_subscription")
-    builder.button(text="🚫 Obunani O'chirish", callback_data="adm_disable_subscription")
     builder.button(text="📊 To'liq Statistika", callback_data="adm_full_stats")
     builder.button(text="❌ Yopish", callback_data="adm_close")
     builder.adjust(2)
@@ -291,6 +223,7 @@ async def start_cmd(m: Message, state: FSMContext):
     await state.clear()
     user = await get_user(m.from_user.id)
 
+    # Referal tekshirish
     referrer_id = None
     args = m.text.split()
     if len(args) > 1 and args[1].startswith("ref"):
@@ -304,11 +237,6 @@ async def start_cmd(m: Message, state: FSMContext):
     if user:
         if user['is_banned']:
             return await m.answer("🚫 Siz botdan bloklangansiz.")
-        
-        # YANGI: Obuna tekshiruvi
-        if not await check_subscription_required(m.from_user.id):
-            return await show_subscription_prompt(m)
-        
         await m.answer(
             f"🌟 *Xush kelibsiz qaytib, {user['name']}!*\n\n"
             f"💰 Balansingiz: *{user['coins']} coin*",
@@ -323,18 +251,6 @@ async def start_cmd(m: Message, state: FSMContext):
             parse_mode="Markdown"
         )
         await state.set_state(BotState.waiting_name)
-
-# ================= YANGI: OBUNA TEKSHIRISH =================
-@dp.callback_query(F.data == "check_sub")
-async def verify_subscription(c: CallbackQuery):
-    await mark_user_subscribed(c.from_user.id)
-    await c.message.edit_text(
-        "✅ *Rahmat! Obuna tasdiqlandi!*\n\n"
-        "Endi botdan to'liq foydalanishingiz mumkin! 🎉\n\n"
-        "🎬 /start ni bosib davom eting",
-        parse_mode="Markdown"
-    )
-    await c.answer("✅ Obuna tasdiqlandi!")
 
 # ================= RO'YXATDAN O'TISH =================
 @dp.message(BotState.waiting_name)
@@ -362,11 +278,6 @@ async def reg_phone_contact(m: Message, state: FSMContext):
         data.get('referrer_id')
     )
     await state.clear()
-    
-    # Obuna tekshiruvi
-    if not await check_subscription_required(m.from_user.id):
-        return await show_subscription_prompt(m)
-    
     await m.answer(
         f"✅ *Tabriklaymiz, {data['name']}!*\n\n"
         "🎉 Ro'yxatdan o'tdingiz!\n"
@@ -381,11 +292,6 @@ async def reg_skip_phone(m: Message, state: FSMContext):
     data = await state.get_data()
     await create_user(m.from_user.id, data['name'], None, data.get('referrer_id'))
     await state.clear()
-    
-    # Obuna tekshiruvi
-    if not await check_subscription_required(m.from_user.id):
-        return await show_subscription_prompt(m)
-    
     await m.answer(
         f"✅ *Tabriklaymiz, {data['name']}!*\n\n"
         "🎉 Ro'yxatdan o'tdingiz!\n"
@@ -397,9 +303,6 @@ async def reg_skip_phone(m: Message, state: FSMContext):
 # ================= KINOLAR RO'YXATI =================
 @dp.message(F.text == "🎬 Kinolar Ro'yxati")
 async def show_movies(m: Message):
-    if not await check_subscription_required(m.from_user.id):
-        return await show_subscription_prompt(m)
-    
     movies = await get_all_movies()
     if not movies:
         return await m.answer("📽 Hozircha bazada kinolar mavjud emas.")
@@ -418,9 +321,6 @@ async def show_movies(m: Message):
 # ================= KINO SOTIB OLISH =================
 @dp.message(F.text == "🎟 Kino Sotib Olish")
 async def buy_movie_start(m: Message, state: FSMContext):
-    if not await check_subscription_required(m.from_user.id):
-        return await show_subscription_prompt(m)
-    
     user = await get_user(m.from_user.id)
     if not user:
         return await m.answer("❌ Avval ro'yxatdan o'ting! /start")
@@ -442,6 +342,7 @@ async def process_buy(m: Message, state: FSMContext):
 
     user = await get_user(m.from_user.id)
 
+    # Allaqachon sotib olinganmi?
     if await user_has_movie(m.from_user.id, movie['id']):
         await state.clear()
         await m.answer(
@@ -450,9 +351,12 @@ async def process_buy(m: Message, state: FSMContext):
             parse_mode="Markdown"
         )
         if movie['file_id']:
+            # Link yoki fayl ID tekshirish
             if movie['file_id'].startswith('http'):
+                # Link uchun tugma yaratish
                 kb = InlineKeyboardBuilder()
                 kb.button(text="🎬 Kinoni Tomosha Qilish", url=movie['file_id'])
+                
                 await m.answer(
                     f"🎬 *{movie['name']}*",
                     reply_markup=kb.as_markup(),
@@ -462,6 +366,7 @@ async def process_buy(m: Message, state: FSMContext):
                 await bot.send_video(m.from_user.id, movie['file_id'], caption=f"🎬 {movie['name']}")
         return
 
+    # Coin yetarlimi?
     if user['coins'] < movie['price']:
         await state.clear()
         return await m.answer(
@@ -472,6 +377,7 @@ async def process_buy(m: Message, state: FSMContext):
             parse_mode="Markdown"
         )
 
+    # Tasdiqlash
     kb = InlineKeyboardBuilder()
     kb.button(text=f"✅ Ha, {movie['price']} coin to'layman", callback_data=f"confirm_buy_{movie['id']}")
     kb.button(text="❌ Bekor qilish", callback_data="cancel_buy")
@@ -502,9 +408,12 @@ async def confirm_purchase(c: CallbackQuery):
             parse_mode="Markdown"
         )
         if movie['file_id']:
+            # Link yoki fayl ID tekshirish
             if movie['file_id'].startswith('http'):
+                # Link uchun tugma yaratish
                 kb = InlineKeyboardBuilder()
                 kb.button(text="🎬 Kinoni Tomosha Qilish", url=movie['file_id'])
+                
                 await bot.send_message(
                     c.from_user.id,
                     f"🎬 *{movie['name']}* ({movie['year']})\n\n"
@@ -533,9 +442,6 @@ async def cancel_purchase(c: CallbackQuery):
 # ================= HISOBIM =================
 @dp.message(F.text == "💰 Hisobim")
 async def my_account(m: Message):
-    if not await check_subscription_required(m.from_user.id):
-        return await show_subscription_prompt(m)
-    
     user = await get_user(m.from_user.id)
     if not user:
         return await m.answer("❌ Avval ro'yxatdan o'ting! /start")
@@ -564,9 +470,6 @@ async def my_account(m: Message):
 # ================= KUNLIK BONUS =================
 @dp.message(F.text == "🎁 Kunlik Bonus")
 async def daily_bonus(m: Message):
-    if not await check_subscription_required(m.from_user.id):
-        return await show_subscription_prompt(m)
-    
     user = await get_user(m.from_user.id)
     if not user:
         return await m.answer("❌ Avval ro'yxatdan o'ting! /start")
@@ -599,9 +502,6 @@ async def daily_bonus(m: Message):
 # ================= DO'ST TAKLIF QILISH =================
 @dp.message(F.text == "👥 Do'st Taklif Qilish")
 async def referral(m: Message):
-    if not await check_subscription_required(m.from_user.id):
-        return await show_subscription_prompt(m)
-    
     bot_info = await bot.get_me()
     ref_link = f"https://t.me/{bot_info.username}?start=ref{m.from_user.id}"
 
@@ -621,104 +521,9 @@ async def referral(m: Message):
         parse_mode="Markdown"
     )
 
-# ================= YANGI: VIDEO YUKLAB OLISH =================
-@dp.message(F.text == "📥 Video Yuklab Olish")
-async def video_download_info(m: Message):
-    if not await check_subscription_required(m.from_user.id):
-        return await show_subscription_prompt(m)
-    
-    await m.answer(
-        "📥 *VIDEO YUKLAB OLISH*\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "🎬 Quyidagi platformalardan video yuklab oling:\n\n"
-        "✅ TikTok\n"
-        "✅ Instagram (Reels, Posts)\n"
-        "✅ YouTube (Shorts, Videos)\n\n"
-        "📝 *Qanday ishlatish:*\n"
-        "1️⃣ Video linkini nusxalang\n"
-        "2️⃣ Linkni botga yuboring\n"
-        "3️⃣ Bot avtomatik yuklab beradi!\n\n"
-        "⚠️ *Eslatma:*\n"
-        "• Video hajmi 50MB gacha\n"
-        "• Private videolar yuklanmaydi\n\n"
-        "💡 *Masalan:*\n"
-        "`https://www.tiktok.com/@user/video/123`\n"
-        "`https://www.instagram.com/reel/ABC/`\n"
-        "`https://youtube.com/shorts/xyz`",
-        parse_mode="Markdown"
-    )
-
-# Video link yuborilsa - yuklab berish
-@dp.message(F.text)
-async def video_downloader(m: Message):
-    # Faqat URL bo'lgan xabarlar
-    if not (m.text.startswith('http://') or m.text.startswith('https://')):
-        return
-    
-    # Obuna tekshiruvi
-    if not await check_subscription_required(m.from_user.id):
-        return await show_subscription_prompt(m)
-    
-    # Qo'llab-quvvatlanadigan saytlar
-    supported = ['tiktok.com', 'instagram.com', 'youtube.com', 'youtu.be']
-    if not any(site in m.text.lower() for site in supported):
-        return
-    
-    status_msg = await m.answer("⏳ *Video yuklanmoqda...*\n\nBir oz kuting!", parse_mode="Markdown")
-    
-    try:
-        import subprocess
-        import tempfile
-        
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as temp_file:
-            temp_path = temp_file.name
-        
-        cmd = [
-            'yt-dlp',
-            '-f', 'best[ext=mp4][filesize<50M]/best[filesize<50M]',
-            '--no-warnings',
-            '-o', temp_path,
-            m.text
-        ]
-        
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
-        
-        if result.returncode == 0 and os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
-            await status_msg.edit_text("📤 *Video yuborilmoqda...*", parse_mode="Markdown")
-            
-            with open(temp_path, 'rb') as video:
-                await bot.send_video(
-                    m.from_user.id,
-                    video,
-                    caption="✅ *Video muvaffaqiyatli yuklandi!*\n\n🤖 Bot orqali yuklandi",
-                    parse_mode="Markdown"
-                )
-            
-            await status_msg.delete()
-            os.remove(temp_path)
-        else:
-            await status_msg.edit_text(
-                "❌ *Video yuklab bo'lmadi!*\n\n"
-                "• Link to'g'riligini tekshiring\n"
-                "• Video ochiq (private emas) bo'lishi kerak\n"
-                "• Video hajmi 50MB dan kichik bo'lishi kerak",
-                parse_mode="Markdown"
-            )
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-                
-    except subprocess.TimeoutExpired:
-        await status_msg.edit_text("⏱ *Vaqt tugadi!* Video juda katta. Qayta urinib ko'ring.", parse_mode="Markdown")
-    except Exception as e:
-        logger.error(f"Video yuklab olishda xatolik: {e}")
-        await status_msg.edit_text("❌ *Xatolik!* Keyinroq urinib ko'ring.", parse_mode="Markdown")
-
 # ================= ADMINGA YOZISH =================
 @dp.message(F.text == "✍️ Adminga Yozish")
 async def write_to_admin(m: Message, state: FSMContext):
-    if not await check_subscription_required(m.from_user.id):
-        return await show_subscription_prompt(m)
-    
     user = await get_user(m.from_user.id)
     if not user:
         return await m.answer("❌ Avval ro'yxatdan o'ting! /start")
@@ -762,7 +567,7 @@ async def active_chat(m: Message, state: FSMContext):
         except Exception as e:
             await m.answer(f"❌ Xabar yuborilmadi: {e}")
 
-# ================= STATISTIKA =================
+# ================= STATISTIKA (TO'G'IRLANGAN) =================
 @dp.message(F.text == "📊 Statistika")
 async def show_stats(m: Message):
     if m.from_user.id != ADMIN_ID:
@@ -806,6 +611,7 @@ async def close_admin(c: CallbackQuery):
     await c.message.delete()
     await c.answer()
 
+# --- TO'LIQ STATISTIKA (TO'G'IRLANGAN) ---
 @dp.callback_query(F.data == "adm_full_stats")
 async def full_stats(c: CallbackQuery):
     if c.from_user.id != ADMIN_ID:
@@ -824,69 +630,6 @@ async def full_stats(c: CallbackQuery):
         reply_markup=get_admin_kb()
     )
     await c.answer()
-
-# ================= YANGI: MAJBURIY OBUNA O'RNATISH =================
-@dp.callback_query(F.data == "adm_set_subscription")
-async def set_subscription_start(c: CallbackQuery, state: FSMContext):
-    if c.from_user.id != ADMIN_ID:
-        return await c.answer("❌ Ruxsat yo'q!", show_alert=True)
-    await c.message.answer(
-        "🔗 *Obuna bo'lish uchun LINK kiriting:*\n\n"
-        "Masalan:\n"
-        "• Instagram: https://instagram.com/your_account\n"
-        "• Telegram: https://t.me/your_channel",
-        parse_mode="Markdown"
-    )
-    await state.set_state(BotState.setting_sub_link)
-    await c.answer()
-
-@dp.message(BotState.setting_sub_link)
-async def save_sub_link(m: Message, state: FSMContext):
-    if not (m.text.startswith('http://') or m.text.startswith('https://')):
-        return await m.answer("⚠️ Iltimos, to'g'ri link kiriting (http:// yoki https:// bilan)")
-    
-    await state.update_data(sub_link=m.text)
-    await m.answer(
-        "📝 *Obuna nomini kiriting:*\n\n"
-        "Masalan:\n"
-        "• Mening Instagram Sahifam\n"
-        "• Telegram Kanalim",
-        parse_mode="Markdown"
-    )
-    await state.set_state(BotState.setting_sub_name)
-
-@dp.message(BotState.setting_sub_name)
-async def save_sub_name(m: Message, state: FSMContext):
-    data = await state.get_data()
-    await set_subscription(data['sub_link'], m.text)
-    await state.clear()
-    
-    # Barcha foydalanuvchilarni obuna bo'lmagan qilib belgilash
-    async with db_pool.acquire() as conn:
-        await conn.execute("UPDATE users SET has_subscribed=FALSE")
-    
-    await m.answer(
-        f"✅ *Majburiy obuna muvaffaqiyatli o'rnatildi!*\n\n"
-        f"📱 Nom: *{m.text}*\n"
-        f"🔗 Link: `{data['sub_link']}`\n\n"
-        f"Endi barcha foydalanuvchilar obuna bo'lishlari kerak!",
-        reply_markup=get_admin_kb(),
-        parse_mode="Markdown"
-    )
-
-@dp.callback_query(F.data == "adm_disable_subscription")
-async def disable_sub(c: CallbackQuery):
-    if c.from_user.id != ADMIN_ID:
-        return await c.answer("❌ Ruxsat yo'q!", show_alert=True)
-    
-    await disable_subscription()
-    await c.message.edit_text(
-        "✅ *Majburiy obuna o'chirildi!*\n\n"
-        "Endi barcha foydalanuvchilar obuna bo'lmasdan ham botdan foydalanishlari mumkin.",
-        reply_markup=get_admin_kb(),
-        parse_mode="Markdown"
-    )
-    await c.answer("✅ Obuna o'chirildi!")
 
 # ================= COIN QO'SHISH =================
 @dp.callback_query(F.data == "adm_add_coin")
@@ -1036,7 +779,7 @@ async def remove_coin_process(m: Message, state: FSMContext):
     except:
         pass
 
-# ================= KINO QO'SHISH =================
+# ================= KINO QO'SHISH (TO'G'IRLANGAN - LINK QABUL QILADI) =================
 @dp.callback_query(F.data == "adm_add_kino")
 async def add_kino_start(c: CallbackQuery, state: FSMContext):
     if c.from_user.id != ADMIN_ID:
@@ -1068,17 +811,20 @@ async def set_k_desc(m: Message, state: FSMContext):
     )
     await state.set_state(BotState.adding_k_file)
 
+# Video fayl yuborilsa
 @dp.message(BotState.adding_k_file, F.video)
 async def set_k_file_video(m: Message, state: FSMContext):
     await state.update_data(k_file=m.video.file_id)
     await m.answer("💰 *Kino narxini coin da kiriting:* (masalan: 50)", parse_mode="Markdown")
     await state.set_state(BotState.adding_k_price)
 
+# Link yuborilsa (matn)
 @dp.message(BotState.adding_k_file, F.text)
 async def set_k_file_link(m: Message, state: FSMContext):
     if m.text == "/skip":
         await state.update_data(k_file=None)
     else:
+        # Link tekshirish
         if m.text.startswith('http://') or m.text.startswith('https://'):
             await state.update_data(k_file=m.text)
         else:
