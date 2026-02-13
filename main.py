@@ -1,4 +1,4 @@
-Import asyncio
+import asyncio
 import os
 import logging
 import sys
@@ -21,7 +21,7 @@ from aiogram.types import (
 
 # ================= KONFIGURATSIYA =================
 TOKEN = os.environ.get("BOT_TOKEN", "8366692220:AAHKoIz6A__Ll1V5yvcjcjWVaFr5Xcf9HQQ")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "7492227388"))
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "A7492227388"))
 ADMIN_PASS = os.environ.get("ADMIN_PASS", "456")
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://kino_bot_db_duf5_user:MNiazQVid4iljB2dvN7LeJ8XfYFdnaJQ@dpg-d672bp8gjchc738fpdm0-a/kino_bot_db_duf5")  # Render PostgreSQL URL
 
@@ -182,6 +182,10 @@ class BotState(StatesGroup):
     unblocking_id = State()
     admin_chat_target = State()
     in_active_chat = State()
+    add_coin_id = State()
+    add_coin_amount = State()
+    remove_coin_id = State()
+    remove_coin_amount = State()
 
 # ================= KLAVIATURALAR =================
 def get_main_kb(uid: int):
@@ -202,6 +206,8 @@ def get_admin_kb():
     builder = InlineKeyboardBuilder()
     builder.button(text="➕ Kino Qo'shish", callback_data="adm_add_kino")
     builder.button(text="🗑 Kino O'chirish", callback_data="adm_del_kino")
+    builder.button(text="💰 Coin Qo'shish", callback_data="adm_add_coin")
+    builder.button(text="💸 Coin Olish", callback_data="adm_remove_coin")
     builder.button(text="📢 Reklama Yuborish", callback_data="adm_broadcast")
     builder.button(text="🚫 Foydalanuvchi Bloklash", callback_data="adm_ban")
     builder.button(text="✅ Blokdan Chiqarish", callback_data="adm_unban")
@@ -341,11 +347,23 @@ async def process_buy(m: Message, state: FSMContext):
         await state.clear()
         await m.answer(
             f"✅ Siz *{movie['name']}* kinoni allaqachon sotib olgansiz!\n\n"
-            "🎬 Quyidagi havoladan tomosha qiling:",
+            "🎬 Quyidagi tugmadan tomosha qiling:",
             parse_mode="Markdown"
         )
         if movie['file_id']:
-            await bot.send_video(m.from_user.id, movie['file_id'], caption=f"🎬 {movie['name']}")
+            # Link yoki fayl ID tekshirish
+            if movie['file_id'].startswith('http'):
+                # Link uchun tugma yaratish
+                kb = InlineKeyboardBuilder()
+                kb.button(text="🎬 Kinoni Tomosha Qilish", url=movie['file_id'])
+                
+                await m.answer(
+                    f"🎬 *{movie['name']}*",
+                    reply_markup=kb.as_markup(),
+                    parse_mode="Markdown"
+                )
+            else:
+                await bot.send_video(m.from_user.id, movie['file_id'], caption=f"🎬 {movie['name']}")
         return
 
     # Coin yetarlimi?
@@ -390,12 +408,26 @@ async def confirm_purchase(c: CallbackQuery):
             parse_mode="Markdown"
         )
         if movie['file_id']:
-            await bot.send_video(
-                c.from_user.id,
-                movie['file_id'],
-                caption=f"🎬 *{movie['name']}* ({movie['year']})\n\nTomosha qiling!",
-                parse_mode="Markdown"
-            )
+            # Link yoki fayl ID tekshirish
+            if movie['file_id'].startswith('http'):
+                # Link uchun tugma yaratish
+                kb = InlineKeyboardBuilder()
+                kb.button(text="🎬 Kinoni Tomosha Qilish", url=movie['file_id'])
+                
+                await bot.send_message(
+                    c.from_user.id,
+                    f"🎬 *{movie['name']}* ({movie['year']})\n\n"
+                    f"✅ Kino tayyor! Quyidagi tugmani bosib tomosha qiling:",
+                    reply_markup=kb.as_markup(),
+                    parse_mode="Markdown"
+                )
+            else:
+                await bot.send_video(
+                    c.from_user.id,
+                    movie['file_id'],
+                    caption=f"🎬 *{movie['name']}* ({movie['year']})\n\nTomosha qiling!",
+                    parse_mode="Markdown"
+                )
         else:
             await c.message.answer("⚠️ Kino fayli hali qo'shilmagan. Admin tez orada qo'shadi!")
     else:
@@ -535,11 +567,12 @@ async def active_chat(m: Message, state: FSMContext):
         except Exception as e:
             await m.answer(f"❌ Xabar yuborilmadi: {e}")
 
-# ================= STATISTIKA =================
+# ================= STATISTIKA (TO'G'IRLANGAN) =================
 @dp.message(F.text == "📊 Statistika")
 async def show_stats(m: Message):
     if m.from_user.id != ADMIN_ID:
         return
+    
     stats = await get_stats()
     await m.answer(
         f"📊 *BOT STATISTIKASI*\n"
@@ -578,11 +611,12 @@ async def close_admin(c: CallbackQuery):
     await c.message.delete()
     await c.answer()
 
-# --- TO'LIQ STATISTIKA ---
+# --- TO'LIQ STATISTIKA (TO'G'IRLANGAN) ---
 @dp.callback_query(F.data == "adm_full_stats")
 async def full_stats(c: CallbackQuery):
     if c.from_user.id != ADMIN_ID:
         return await c.answer("❌ Ruxsat yo'q!", show_alert=True)
+    
     stats = await get_stats()
     await c.message.edit_text(
         f"📊 *TO'LIQ STATISTIKA*\n"
@@ -597,7 +631,155 @@ async def full_stats(c: CallbackQuery):
     )
     await c.answer()
 
-# --- KINO QO'SHISH ---
+# ================= COIN QO'SHISH =================
+@dp.callback_query(F.data == "adm_add_coin")
+async def add_coin_start(c: CallbackQuery, state: FSMContext):
+    if c.from_user.id != ADMIN_ID:
+        return await c.answer("❌ Ruxsat yo'q!", show_alert=True)
+    await c.message.answer("💰 *Coin qo'shish*\n\nFoydalanuvchi *ID* sini kiriting:", parse_mode="Markdown")
+    await state.set_state(BotState.add_coin_id)
+    await c.answer()
+
+@dp.message(BotState.add_coin_id)
+async def add_coin_get_id(m: Message, state: FSMContext):
+    if not m.text.isdigit():
+        return await m.answer("⚠️ Faqat ID raqamini kiriting!")
+    
+    user_id = int(m.text)
+    user = await get_user(user_id)
+    
+    if not user:
+        await state.clear()
+        return await m.answer("❌ Bunday foydalanuvchi topilmadi!")
+    
+    await state.update_data(target_user_id=user_id)
+    await m.answer(
+        f"👤 *Foydalanuvchi:* {user['name']}\n"
+        f"💰 *Joriy balans:* {user['coins']} coin\n\n"
+        f"Qancha coin qo'shmoqchisiz?",
+        parse_mode="Markdown"
+    )
+    await state.set_state(BotState.add_coin_amount)
+
+@dp.message(BotState.add_coin_amount)
+async def add_coin_process(m: Message, state: FSMContext):
+    if not m.text.isdigit() or int(m.text) <= 0:
+        return await m.answer("⚠️ Faqat musbat son kiriting!")
+    
+    data = await state.get_data()
+    user_id = data['target_user_id']
+    amount = int(m.text)
+    
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET coins = coins + $1 WHERE user_id=$2",
+            amount, user_id
+        )
+    
+    updated_user = await get_user(user_id)
+    await state.clear()
+    
+    await m.answer(
+        f"✅ *Coin muvaffaqiyatli qo'shildi!*\n\n"
+        f"👤 Foydalanuvchi ID: `{user_id}`\n"
+        f"➕ Qo'shildi: *+{amount} coin*\n"
+        f"💰 Yangi balans: *{updated_user['coins']} coin*",
+        parse_mode="Markdown",
+        reply_markup=get_admin_kb()
+    )
+    
+    try:
+        await bot.send_message(
+            user_id,
+            f"🎉 *Tabriklaymiz!*\n\n"
+            f"Sizga *+{amount} coin* qo'shildi!\n"
+            f"💰 Yangi balans: *{updated_user['coins']} coin*",
+            parse_mode="Markdown"
+        )
+    except:
+        pass
+
+# ================= COIN OLISH =================
+@dp.callback_query(F.data == "adm_remove_coin")
+async def remove_coin_start(c: CallbackQuery, state: FSMContext):
+    if c.from_user.id != ADMIN_ID:
+        return await c.answer("❌ Ruxsat yo'q!", show_alert=True)
+    await c.message.answer("💸 *Coin olish*\n\nFoydalanuvchi *ID* sini kiriting:", parse_mode="Markdown")
+    await state.set_state(BotState.remove_coin_id)
+    await c.answer()
+
+@dp.message(BotState.remove_coin_id)
+async def remove_coin_get_id(m: Message, state: FSMContext):
+    if not m.text.isdigit():
+        return await m.answer("⚠️ Faqat ID raqamini kiriting!")
+    
+    user_id = int(m.text)
+    user = await get_user(user_id)
+    
+    if not user:
+        await state.clear()
+        return await m.answer("❌ Bunday foydalanuvchi topilmadi!")
+    
+    await state.update_data(target_user_id=user_id)
+    await m.answer(
+        f"👤 *Foydalanuvchi:* {user['name']}\n"
+        f"💰 *Joriy balans:* {user['coins']} coin\n\n"
+        f"Qancha coin olmoqchisiz?",
+        parse_mode="Markdown"
+    )
+    await state.set_state(BotState.remove_coin_amount)
+
+@dp.message(BotState.remove_coin_amount)
+async def remove_coin_process(m: Message, state: FSMContext):
+    if not m.text.isdigit() or int(m.text) <= 0:
+        return await m.answer("⚠️ Faqat musbat son kiriting!")
+    
+    data = await state.get_data()
+    user_id = data['target_user_id']
+    amount = int(m.text)
+    
+    user = await get_user(user_id)
+    
+    if user['coins'] < amount:
+        await state.clear()
+        return await m.answer(
+            f"⚠️ *Foydalanuvchida coin yetarli emas!*\n\n"
+            f"💰 Foydalanuvchi balansi: {user['coins']} coin\n"
+            f"💸 Olmoqchi bo'lgan: {amount} coin",
+            parse_mode="Markdown",
+            reply_markup=get_admin_kb()
+        )
+    
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET coins = coins - $1 WHERE user_id=$2",
+            amount, user_id
+        )
+    
+    updated_user = await get_user(user_id)
+    await state.clear()
+    
+    await m.answer(
+        f"✅ *Coin muvaffaqiyatli olindi!*\n\n"
+        f"👤 Foydalanuvchi ID: `{user_id}`\n"
+        f"➖ Olindi: *-{amount} coin*\n"
+        f"💰 Yangi balans: *{updated_user['coins']} coin*",
+        parse_mode="Markdown",
+        reply_markup=get_admin_kb()
+    )
+    
+    try:
+        await bot.send_message(
+            user_id,
+            f"⚠️ *E'tibor!*\n\n"
+            f"Sizdan *-{amount} coin* yechildi!\n"
+            f"💰 Yangi balans: *{updated_user['coins']} coin*",
+            parse_mode="Markdown"
+        )
+    except:
+        pass
+
+# ================= KINO QO'SHISH (TO'G'IRLANGAN - LINK QABUL QILADI) =================
 @dp.callback_query(F.data == "adm_add_kino")
 async def add_kino_start(c: CallbackQuery, state: FSMContext):
     if c.from_user.id != ADMIN_ID:
@@ -622,21 +804,32 @@ async def set_k_year(m: Message, state: FSMContext):
 async def set_k_desc(m: Message, state: FSMContext):
     await state.update_data(k_desc=m.text)
     await m.answer(
-        "🎥 *Kino faylini (video) yuboring:*\n\n"
-        "⏭ Fayl yo'q bo'lsa /skip yozing",
+        "🔗 *Kino linkini yoki video faylini yuboring:*\n\n"
+        "📎 Link yoki video fayl yuborishingiz mumkin\n"
+        "⏭ Yo'q bo'lsa /skip yozing",
         parse_mode="Markdown"
     )
     await state.set_state(BotState.adding_k_file)
 
+# Video fayl yuborilsa
 @dp.message(BotState.adding_k_file, F.video)
-async def set_k_file(m: Message, state: FSMContext):
+async def set_k_file_video(m: Message, state: FSMContext):
     await state.update_data(k_file=m.video.file_id)
     await m.answer("💰 *Kino narxini coin da kiriting:* (masalan: 50)", parse_mode="Markdown")
     await state.set_state(BotState.adding_k_price)
 
-@dp.message(BotState.adding_k_file, F.text == "/skip")
-async def skip_k_file(m: Message, state: FSMContext):
-    await state.update_data(k_file=None)
+# Link yuborilsa (matn)
+@dp.message(BotState.adding_k_file, F.text)
+async def set_k_file_link(m: Message, state: FSMContext):
+    if m.text == "/skip":
+        await state.update_data(k_file=None)
+    else:
+        # Link tekshirish
+        if m.text.startswith('http://') or m.text.startswith('https://'):
+            await state.update_data(k_file=m.text)
+        else:
+            return await m.answer("⚠️ Iltimos, to'g'ri link kiriting (http:// yoki https:// bilan boshlanishi kerak)\n\nYoki video fayl yuboring!")
+    
     await m.answer("💰 *Kino narxini coin da kiriting:* (masalan: 50)", parse_mode="Markdown")
     await state.set_state(BotState.adding_k_price)
 
@@ -644,24 +837,31 @@ async def skip_k_file(m: Message, state: FSMContext):
 async def save_kino(m: Message, state: FSMContext):
     if not m.text.isdigit():
         return await m.answer("⚠️ Faqat raqam kiriting!")
+    
     data = await state.get_data()
     new_id = await add_movie(
-        data['k_name'], data['k_year'],
-        data.get('k_desc', ''), data.get('k_file'),
+        data['k_name'], 
+        data['k_year'],
+        data.get('k_desc', ''), 
+        data.get('k_file'),
         int(m.text)
     )
     await state.clear()
+    
+    file_type = "Link" if data.get('k_file') and data.get('k_file').startswith('http') else "Video fayl"
+    
     await m.answer(
         f"✅ *Kino muvaffaqiyatli qo'shildi!*\n\n"
         f"🆔 Kodi: `{new_id}`\n"
         f"🎬 Nomi: {data['k_name']}\n"
         f"📅 Yil: {data['k_year']}\n"
+        f"📎 Turi: {file_type}\n"
         f"💰 Narx: {m.text} coin",
         parse_mode="Markdown",
         reply_markup=get_admin_kb()
     )
 
-# --- KINO O'CHIRISH ---
+# ================= KINO O'CHIRISH =================
 @dp.callback_query(F.data == "adm_del_kino")
 async def del_kino_start(c: CallbackQuery):
     if c.from_user.id != ADMIN_ID:
@@ -698,7 +898,7 @@ async def delete_movie(c: CallbackQuery):
     )
     await c.answer()
 
-# --- REKLAMA YUBORISH ---
+# ================= REKLAMA YUBORISH =================
 @dp.callback_query(F.data == "adm_broadcast")
 async def broadcast_start(c: CallbackQuery, state: FSMContext):
     if c.from_user.id != ADMIN_ID:
@@ -731,7 +931,7 @@ async def process_broadcast(m: Message, state: FSMContext):
         parse_mode="Markdown"
     )
 
-# --- BLOKLASH ---
+# ================= BLOKLASH =================
 @dp.callback_query(F.data == "adm_ban")
 async def ban_start(c: CallbackQuery, state: FSMContext):
     if c.from_user.id != ADMIN_ID:
@@ -754,7 +954,7 @@ async def process_ban(m: Message, state: FSMContext):
         pass
     await m.answer(f"✅ Foydalanuvchi (ID: `{uid}`) bloklandi!", parse_mode="Markdown", reply_markup=get_admin_kb())
 
-# --- BLOKDAN CHIQARISH ---
+# ================= BLOKDAN CHIQARISH =================
 @dp.callback_query(F.data == "adm_unban")
 async def unban_start(c: CallbackQuery, state: FSMContext):
     if c.from_user.id != ADMIN_ID:
@@ -777,7 +977,7 @@ async def process_unban(m: Message, state: FSMContext):
         pass
     await m.answer(f"✅ Foydalanuvchi (ID: `{uid}`) blokdan chiqarildi!", parse_mode="Markdown", reply_markup=get_admin_kb())
 
-# --- ADMIN CHAT ---
+# ================= ADMIN CHAT =================
 @dp.callback_query(F.data == "adm_start_chat")
 async def admin_chat_init(c: CallbackQuery, state: FSMContext):
     if c.from_user.id != ADMIN_ID:
@@ -843,4 +1043,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        logger.info("Bot to'xtatildi.") Bu kodni xotirnagda saqlab qoy abadiy qolain menga azizi kod bu
+        logger.info("Bot to'xtatildi.")
