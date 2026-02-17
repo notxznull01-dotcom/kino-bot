@@ -210,26 +210,32 @@ async def check_user_subscribed(user_id: int) -> bool:
                     pass
     return True
 
+# =====================================================================
+# TUZATILGAN: send_subscription_message — rasmdagidek UI
+# =====================================================================
 async def send_subscription_message(user_id: int):
-    channels = await get_required_channels()
-    if not channels:
-        return
-    kb = InlineKeyboardBuilder()
-    for ch in channels:
-        kb.button(text=f"📢 {ch['title']}", url=ch['link'])
-    kb.button(text="✅ Obuna bo'ldim, tekshirish", callback_data="check_subscription")
-    kb.adjust(1)
-    text = "⚠️ *Botdan to'liq foydalanish uchun quyidagi kanallarga obuna bo'ling!*\n\n"
-    for i, ch in enumerate(channels, 1):
-        text += f"{i}. [{ch['title']}]({ch['link']})\n"
-    text += "\nObuna bo'lgach, *✅ Obuna bo'ldim, tekshirish* tugmasini bosing."
-    await bot.send_message(
-        user_id,
-        text,
-        reply_markup=kb.as_markup(),
-        parse_mode="Markdown",
-        disable_web_page_preview=True
-    )
+    try:
+        channels = await get_required_channels()
+        if not channels:
+            return
+        kb = InlineKeyboardBuilder()
+        for ch in channels:
+            kb.button(text=f"✖ A'zo bo'lish", url=ch['link'])
+        kb.button(text="🔄 Tekshirish", callback_data="check_subscription")
+        kb.adjust(1)
+        text = (
+            "⚠️ *Botdan to'liq foydalanish uchun\n"
+            "quyidagi kanallarimizga obuna bo'ling!*"
+        )
+        await bot.send_message(
+            user_id,
+            text,
+            reply_markup=kb.as_markup(),
+            parse_mode="Markdown",
+            disable_web_page_preview=True
+        )
+    except Exception as e:
+        logger.warning(f"send_subscription_message xato (user {user_id}): {e}")
 
 # ================= FSM HOLATLAR =================
 class BotState(StatesGroup):
@@ -253,6 +259,7 @@ class BotState(StatesGroup):
     remove_coin_amount = State()
     adding_sub_link = State()
     adding_sub_title = State()
+    users_page = State()
 
 # ================= KLAVIATURALAR =================
 def get_main_kb(uid: int):
@@ -281,6 +288,7 @@ def get_admin_kb():
     builder.button(text="💬 Foydalanuvchi bilan Gaplash", callback_data="adm_start_chat")
     builder.button(text="📊 To'liq Statistika", callback_data="adm_full_stats")
     builder.button(text="🔔 Majburiy Obuna", callback_data="adm_subscription")
+    builder.button(text="👥 Foydalanuvchilar Ro'yxati", callback_data="adm_users")
     builder.button(text="❌ Yopish", callback_data="adm_close")
     builder.adjust(2)
     return builder.as_markup()
@@ -382,59 +390,42 @@ async def reg_name(m: Message, state: FSMContext):
     )
     await state.set_state(BotState.waiting_phone)
 
-@dp.message(BotState.waiting_phone, F.contact)
-async def reg_phone_contact(m: Message, state: FSMContext):
+async def finish_registration(m: Message, state: FSMContext, name: str, phone: str = None):
+    """Ro'yxatdan o'tishni yakunlaydi va obuna tekshiradi"""
     data = await state.get_data()
-    await create_user(
-        m.from_user.id,
-        data['name'],
-        m.contact.phone_number,
-        data.get('referrer_id')
-    )
+    await create_user(m.from_user.id, name, phone, data.get('referrer_id'))
     await state.clear()
-    is_subscribed = await check_user_subscribed(m.from_user.id)
-    if not is_subscribed:
+
+    channels = await get_required_channels()
+    if channels:
         await m.answer(
-            f"✅ *Tabriklaymiz, {data['name']}!*\n\n"
+            f"✅ *Tabriklaymiz, {name}!*\n\n"
             "🎉 Ro'yxatdan o'tdingiz!\n"
             "💰 Sizga *100 coin* sovg'a qilindi!\n\n"
             "⚠️ Botdan foydalanish uchun quyidagi kanallarga obuna bo'ling:",
             parse_mode="Markdown",
             reply_markup=ReplyKeyboardRemove()
         )
-        return await send_subscription_message(m.from_user.id)
-    await m.answer(
-        f"✅ *Tabriklaymiz, {data['name']}!*\n\n"
-        "🎉 Ro'yxatdan o'tdingiz!\n"
-        "💰 Sizga *100 coin* sovg'a qilindi!\n\n"
-        "🎬 Endi kinolardan bahramand bo'ling!",
-        reply_markup=get_main_kb(m.from_user.id),
-        parse_mode="Markdown"
-    )
+        await send_subscription_message(m.from_user.id)
+    else:
+        await m.answer(
+            f"✅ *Tabriklaymiz, {name}!*\n\n"
+            "🎉 Ro'yxatdan o'tdingiz!\n"
+            "💰 Sizga *100 coin* sovg'a qilindi!\n\n"
+            "🎬 Endi kinolardan bahramand bo'ling!",
+            reply_markup=get_main_kb(m.from_user.id),
+            parse_mode="Markdown"
+        )
+
+@dp.message(BotState.waiting_phone, F.contact)
+async def reg_phone_contact(m: Message, state: FSMContext):
+    data = await state.get_data()
+    await finish_registration(m, state, data['name'], m.contact.phone_number)
 
 @dp.message(BotState.waiting_phone, F.text == "⏭ O'tkazib yuborish")
 async def reg_skip_phone(m: Message, state: FSMContext):
     data = await state.get_data()
-    await create_user(m.from_user.id, data['name'], None, data.get('referrer_id'))
-    await state.clear()
-    is_subscribed = await check_user_subscribed(m.from_user.id)
-    if not is_subscribed:
-        await m.answer(
-            f"✅ *Tabriklaymiz, {data['name']}!*\n\n"
-            "🎉 Ro'yxatdan o'tdingiz!\n"
-            "💰 Sizga *100 coin* sovg'a qilindi!\n\n"
-            "⚠️ Botdan foydalanish uchun quyidagi kanallarga obuna bo'ling:",
-            parse_mode="Markdown",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return await send_subscription_message(m.from_user.id)
-    await m.answer(
-        f"✅ *Tabriklaymiz, {data['name']}!*\n\n"
-        "🎉 Ro'yxatdan o'tdingiz!\n"
-        "💰 Sizga *100 coin* sovg'a qilindi!",
-        reply_markup=get_main_kb(m.from_user.id),
-        parse_mode="Markdown"
-    )
+    await finish_registration(m, state, data['name'], None)
 
 # ================= KINOLAR RO'YXATI =================
 @dp.message(F.text == "🎬 Kinolar Ro'yxati")
@@ -728,6 +719,51 @@ async def full_stats(c: CallbackQuery):
     )
     await c.answer()
 
+# ================= FOYDALANUVCHILAR RO'YXATI (ADMIN) =================
+@dp.callback_query(F.data == "adm_users")
+async def admin_users_list(c: CallbackQuery):
+    if c.from_user.id != ADMIN_ID:
+        return await c.answer("❌ Ruxsat yo'q!", show_alert=True)
+    async with db_pool.acquire() as conn:
+        users = await conn.fetch(
+            "SELECT user_id, name, phone, coins, joined_at, is_banned FROM users ORDER BY joined_at DESC LIMIT 50"
+        )
+    if not users:
+        await c.answer("📭 Hali foydalanuvchilar yo'q!", show_alert=True)
+        return
+    text = "👥 *FOYDALANUVCHILAR RO'YXATI*\n━━━━━━━━━━━━━━━━━━\n\n"
+    for i, u in enumerate(users, 1):
+        status = "🚫" if u['is_banned'] else "✅"
+        text += f"{i}. {status} *{u['name']}*\n"
+        text += f"   🔑 ID: `{u['user_id']}`\n"
+        text += f"   📱 Tel: {u['phone'] or 'Kiritilmagan'}\n"
+        text += f"   💰 Coin: {u['coins']}\n"
+        text += f"   📅 Sana: {u['joined_at']}\n"
+        text += "   ──────────────\n"
+    text += f"\n📊 Ko'rsatildi: *{len(users)}* ta (oxirgi 50)"
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🔙 Orqaga", callback_data="sub_back")
+    kb.adjust(1)
+    try:
+        await c.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="Markdown")
+    except Exception:
+        await c.message.edit_text(
+            f"👥 *FOYDALANUVCHILAR RO'YXATI*\n━━━━━━━━━━━━\n\nJami: *{len(users)}* ta\n\n_(Ro'yxat alohida xabarda)_",
+            reply_markup=kb.as_markup(), parse_mode="Markdown"
+        )
+        chunk = ""
+        for i, u in enumerate(users, 1):
+            status = "🚫" if u['is_banned'] else "✅"
+            line = f"{i}. {status} *{u['name']}* | ID: `{u['user_id']}` | Tel: {u['phone'] or '—'} | {u['coins']} coin\n"
+            if len(chunk) + len(line) > 3800:
+                await bot.send_message(c.from_user.id, chunk, parse_mode="Markdown")
+                chunk = line
+            else:
+                chunk += line
+        if chunk:
+            await bot.send_message(c.from_user.id, chunk, parse_mode="Markdown")
+    await c.answer()
+
 # ================= MAJBURIY OBUNA BOSHQARUVI =================
 @dp.callback_query(F.data == "adm_subscription")
 async def admin_subscription_menu(c: CallbackQuery):
@@ -735,7 +771,7 @@ async def admin_subscription_menu(c: CallbackQuery):
         return await c.answer("❌ Ruxsat yo'q!", show_alert=True)
     channels = await get_required_channels()
     kb = InlineKeyboardBuilder()
-    kb.button(text="➕ Kanal/Akkount Qo'shish", callback_data="sub_add")
+    kb.button(text="➕ Kanal Qo'shish", callback_data="sub_add")
     if channels:
         kb.button(text="🗑 Kanal O'chirish", callback_data="sub_del_list")
     kb.button(text="🔙 Orqaga", callback_data="sub_back")
@@ -747,7 +783,6 @@ async def admin_subscription_menu(c: CallbackQuery):
             text += f"• [{ch['title']}]({ch['link']})\n"
     else:
         text += "📭 Hozircha kanallar qo'shilmagan.\n"
-    text += "\n💡 Telegram kanal yoki Instagram akkounti linkini qo'shishingiz mumkin."
     await c.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="Markdown", disable_web_page_preview=True)
     await c.answer()
 
@@ -761,10 +796,10 @@ async def sub_add_start(c: CallbackQuery, state: FSMContext):
     if c.from_user.id != ADMIN_ID:
         return await c.answer("❌ Ruxsat yo'q!", show_alert=True)
     await c.message.answer(
-        "🔗 *Kanal yoki akkount linkini yuboring:*\n\n"
+        "🔗 *Kanal linkini yuboring:*\n\n"
         "Misol:\n"
-        "• Telegram: `https://t.me/kanalnom`\n"
-        "• Instagram: `https://instagram.com/akkountnom`",
+        "• `https://t.me/kanalnom`\n"
+        "• `https://instagram.com/akkountnom`",
         parse_mode="Markdown"
     )
     await state.set_state(BotState.adding_sub_link)
@@ -774,56 +809,77 @@ async def sub_add_start(c: CallbackQuery, state: FSMContext):
 async def sub_get_link(m: Message, state: FSMContext):
     link = m.text.strip()
     if not (link.startswith('http://') or link.startswith('https://')):
-        return await m.answer("⚠️ Link http:// yoki https:// bilan boshlanishi kerak!\n\nQaytadan kiriting:")
+        return await m.answer(
+            "⚠️ Link http:// yoki https:// bilan boshlanishi kerak!\n\nQaytadan kiriting:"
+        )
     await state.update_data(sub_link=link)
     await m.answer(
-        "📝 *Kanal/Akkount nomini kiriting:*\n\n(Masalan: Kino Kanal yoki Instagram Sahifam)",
+        "📝 *Kanal nomini kiriting:*\n\n(Masalan: Kino Kanal)",
         parse_mode="Markdown"
     )
     await state.set_state(BotState.adding_sub_title)
 
-# ===== ASOSIY TUZATMA: KANAL QO'SHILGANDAN SO'NG HAMMA FOYDALANUVCHIGA XABAR =====
+# =====================================================================
+# TUZATILGAN: sub_get_title — tasdiq xabari + barcha userlarga yuborish
+# =====================================================================
 @dp.message(BotState.adding_sub_title)
 async def sub_get_title(m: Message, state: FSMContext):
-    data = await state.get_data()
-    link = data['sub_link']
-    title = m.text.strip()
+    try:
+        data = await state.get_data()
+        link = data.get('sub_link', '')
+        title = m.text.strip()
 
-    await add_required_channel(link, title)
-    await state.clear()
+        # Kanalga qo'shish
+        await add_required_channel(link, title)
+        await state.clear()
 
-    await m.answer(
-        f"✅ *Muvaffaqiyatli qo'shildi!*\n\n"
-        f"📛 Nomi: *{title}*\n"
-        f"🔗 Link: {link}\n\n"
-        f"⏳ Barcha foydalanuvchilarga obuna xabari yuborilmoqda...",
-        parse_mode="Markdown",
-        reply_markup=get_admin_kb()
-    )
+        # Darhol tasdiq xabari
+        await m.answer(
+            f"✅ *Kanal muvaffaqiyatli qo'shildi!*\n\n"
+            f"📛 Nomi: *{title}*\n"
+            f"🔗 Link: {link}",
+            parse_mode="Markdown",
+            disable_web_page_preview=True
+        )
 
-    # BARCHA FOYDALANUVCHILARGA YUBORISH
-    all_users = await get_all_users()
-    sent = 0
-    failed = 0
-    for u in all_users:
-        if u['user_id'] == ADMIN_ID:
-            continue
-        try:
-            await send_subscription_message(u['user_id'])
-            sent += 1
-            await asyncio.sleep(0.05)
-        except:
-            failed += 1
+        # Barcha foydalanuvchilarga yuborish (background task)
+        asyncio.create_task(broadcast_subscription_to_all(m.from_user.id))
 
-    await m.answer(
-        f"📢 *Obuna xabari yuborildi!*\n\n"
-        f"✅ Muvaffaqiyatli: *{sent}* ta\n"
-        f"❌ Yuborilmadi: *{failed}* ta\n\n"
-        f"Foydalanuvchilar obuna bo'lmaguncha botdan foydalana olmaydi.",
-        parse_mode="Markdown"
-    )
+    except Exception as e:
+        logger.error(f"sub_get_title xato: {e}")
+        await state.clear()
+        await m.answer(f"❌ Xatolik yuz berdi: {e}")
 
-# ===== KANALLAR RO'YXATIDAN O'CHIRISH (KINO O'CHIRISHDEK) =====
+async def broadcast_subscription_to_all(admin_id: int):
+    """Barcha foydalanuvchilarga majburiy obuna xabari yuboradi"""
+    try:
+        all_users = await get_all_users()
+        sent = 0
+        failed = 0
+        for u in all_users:
+            if u['user_id'] == admin_id:
+                continue
+            try:
+                await send_subscription_message(u['user_id'])
+                sent += 1
+                await asyncio.sleep(0.05)
+            except Exception as e:
+                failed += 1
+                logger.warning(f"Broadcast xato (user {u['user_id']}): {e}")
+
+        # Adminga natija yuborish
+        await bot.send_message(
+            admin_id,
+            f"📢 *Obuna xabari yuborildi!*\n\n"
+            f"✅ Muvaffaqiyatli: *{sent}* ta\n"
+            f"❌ Yuborilmadi: *{failed}* ta",
+            parse_mode="Markdown",
+            reply_markup=get_admin_kb()
+        )
+    except Exception as e:
+        logger.error(f"broadcast_subscription_to_all xato: {e}")
+
+# ===== KANALLAR RO'YXATIDAN O'CHIRISH =====
 @dp.callback_query(F.data == "sub_del_list")
 async def sub_del_list(c: CallbackQuery):
     if c.from_user.id != ADMIN_ID:
@@ -854,7 +910,6 @@ async def sub_del_confirm(c: CallbackQuery):
     ch_name = ch['title'] if ch else "Kanal"
     await c.answer(f"✅ '{ch_name}' o'chirildi!", show_alert=True)
 
-    # Yangilangan ro'yxatni ko'rsatish
     channels = await get_required_channels()
     kb = InlineKeyboardBuilder()
     if channels:
