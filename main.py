@@ -211,27 +211,57 @@ async def check_user_subscribed(user_id: int) -> bool:
     return True
 
 # =====================================================================
-# TUZATILGAN: send_subscription_message — rasmdagidek UI
+# OBUNA — har bir kanal alohida tekshiriladi
 # =====================================================================
+async def get_unsubscribed_channels(user_id: int) -> list:
+    """Foydalanuvchi obuna bo'lmagan kanallar ro'yxatini qaytaradi"""
+    channels = await get_required_channels()
+    unsubscribed = []
+    for channel in channels:
+        link = channel['link']
+        is_subscribed = True
+        if 't.me/' in link or 'telegram.me/' in link:
+            username = None
+            if 't.me/' in link:
+                username = link.split('t.me/')[-1].strip().strip('/')
+            elif 'telegram.me/' in link:
+                username = link.split('telegram.me/')[-1].strip().strip('/')
+            if username and not username.startswith('+'):
+                try:
+                    member = await bot.get_chat_member(f"@{username}", user_id)
+                    if member.status in ['left', 'kicked', 'banned']:
+                        is_subscribed = False
+                except Exception:
+                    pass
+        if not is_subscribed:
+            unsubscribed.append(channel)
+    return unsubscribed
+
+def build_subscription_keyboard(unsubscribed_channels: list):
+    """Obuna bo'lmagan kanallar uchun tugmalar yaratadi"""
+    kb = InlineKeyboardBuilder()
+    emojis = ["✖", "❌", "🔴", "⛔", "🚫"]
+    for i, ch in enumerate(unsubscribed_channels):
+        emoji = emojis[i % len(emojis)]
+        kb.button(text=f"{emoji} A'zo bo'lish", url=ch['link'])
+    kb.button(text="🔄 Tekshirish", callback_data="check_subscription")
+    kb.adjust(1)
+    return kb.as_markup()
+
 async def send_subscription_message(user_id: int):
+    """Barcha obuna bo'lmagan kanallarni ko'rsatadi"""
     try:
-        channels = await get_required_channels()
-        if not channels:
+        all_channels = await get_required_channels()
+        if not all_channels:
             return
-        kb = InlineKeyboardBuilder()
-        for ch in channels:
-            kb.button(text=f"✖ A'zo bo'lish", url=ch['link'])
-        kb.button(text="🔄 Tekshirish", callback_data="check_subscription")
-        kb.adjust(1)
-        text = (
-            "⚠️ *Botdan to'liq foydalanish uchun\n"
-            "quyidagi kanallarimizga obuna bo'ling!*"
-        )
+        unsubscribed = await get_unsubscribed_channels(user_id)
+        channels_to_show = unsubscribed if unsubscribed else all_channels
+        text = "⚠️ <b>Botdan to'liq foydalanish uchun\nquyidagi kanallarimizga obuna bo'ling!</b>"
         await bot.send_message(
             user_id,
             text,
-            reply_markup=kb.as_markup(),
-            parse_mode="Markdown",
+            reply_markup=build_subscription_keyboard(channels_to_show),
+            parse_mode="HTML",
             disable_web_page_preview=True
         )
     except Exception as e:
@@ -300,8 +330,8 @@ async def subscription_check_middleware(m: Message) -> bool:
         return True
     if user['is_banned']:
         return True
-    is_subscribed = await check_user_subscribed(m.from_user.id)
-    if not is_subscribed:
+    unsubscribed = await get_unsubscribed_channels(m.from_user.id)
+    if unsubscribed:
         await send_subscription_message(m.from_user.id)
         return False
     return True
@@ -325,8 +355,8 @@ async def start_cmd(m: Message, state: FSMContext):
     if user:
         if user['is_banned']:
             return await m.answer("🚫 Siz botdan bloklangansiz.")
-        is_subscribed = await check_user_subscribed(m.from_user.id)
-        if not is_subscribed:
+        unsubscribed = await get_unsubscribed_channels(m.from_user.id)
+        if unsubscribed:
             return await send_subscription_message(m.from_user.id)
         await m.answer(
             f"🌟 *Xush kelibsiz qaytib, {user['name']}!*\n\n"
@@ -353,26 +383,42 @@ async def check_sub_callback(c: CallbackQuery):
     if user['is_banned']:
         await c.answer("🚫 Siz botdan bloklangansiz.", show_alert=True)
         return
-    is_subscribed = await check_user_subscribed(c.from_user.id)
-    if is_subscribed:
+
+    await c.answer("🔄 Tekshirilmoqda...")
+
+    # Har bir kanal alohida tekshiriladi
+    unsubscribed = await get_unsubscribed_channels(c.from_user.id)
+
+    if not unsubscribed:
+        # Hammaga obuna bo'lgan — botni ochish
         try:
             await c.message.edit_text(
-                "✅ *Rahmat! Obuna tasdiqlandi!*\n\nEndi botdan to'liq foydalanishingiz mumkin!",
-                parse_mode="Markdown"
+                "✅ <b>Rahmat! Obuna tasdiqlandi!</b>\n\nEndi botdan to'liq foydalanishingiz mumkin!",
+                parse_mode="HTML"
             )
         except:
             pass
         await bot.send_message(
             c.from_user.id,
-            f"🎉 *Xush kelibsiz, {user['name']}!*\n\n💰 Balansingiz: *{user['coins']} coin*",
+            f"🎉 <b>Xush kelibsiz, {user['name']}!</b>\n\n💰 Balansingiz: <b>{user['coins']} coin</b>",
             reply_markup=get_main_kb(c.from_user.id),
-            parse_mode="Markdown"
+            parse_mode="HTML"
         )
     else:
-        await c.answer(
-            "❌ Siz hali barcha kanallarga obuna bo'lmadingiz!\n\nIltimos, avval obuna bo'ling.",
-            show_alert=True
+        # Hali obuna bo'lmagan kanallar bor — faqat ularni ko'rsat
+        text = (
+            f"⚠️ <b>Hali {len(unsubscribed)} ta kanalga obuna bo'lmadingiz!</b>\n"
+            f"Quyidagi kanallarga obuna bo'lib, <b>Tekshirish</b> tugmasini bosing:"
         )
+        try:
+            await c.message.edit_text(
+                text,
+                reply_markup=build_subscription_keyboard(unsubscribed),
+                parse_mode="HTML",
+                disable_web_page_preview=True
+            )
+        except:
+            pass
 
 # ================= RO'YXATDAN O'TISH =================
 @dp.message(BotState.waiting_name)
@@ -835,10 +881,10 @@ async def sub_get_title(m: Message, state: FSMContext):
 
         # Darhol tasdiq xabari
         await m.answer(
-            f"✅ *Kanal muvaffaqiyatli qo'shildi!*\n\n"
-            f"📛 Nomi: *{title}*\n"
-            f"🔗 Link: {link}",
-            parse_mode="Markdown",
+            f"✅ <b>Kanal muvaffaqiyatli qo'shildi!</b>\n\n"
+            f"📛 Nomi: <b>{title}</b>\n"
+            f"🔗 Link: <code>{link}</code>",
+            parse_mode="HTML",
             disable_web_page_preview=True
         )
 
