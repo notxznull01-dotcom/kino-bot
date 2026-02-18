@@ -98,25 +98,28 @@ async def init_db():
                 added_at TIMESTAMP DEFAULT NOW()
             )
         """)
-        # Tashqi kanallar (Instagram va h.k.) uchun tasdiqlash jadvali
+        # Har bir foydalanuvchi + kanal juftligi uchun holat
         await conn.execute("""
-            CREATE TABLE IF NOT EXISTS user_channel_confirmations (
+            CREATE TABLE IF NOT EXISTS user_sub_status (
                 user_id BIGINT,
                 channel_id INTEGER,
-                confirmed_at TIMESTAMP DEFAULT NOW(),
+                is_subscribed BOOLEAN DEFAULT FALSE,
+                last_checked TIMESTAMP DEFAULT NOW(),
+                subscribed_at TIMESTAMP,
+                unsubscribed_at TIMESTAMP,
                 PRIMARY KEY (user_id, channel_id)
             )
         """)
-        # Obuna hodisalari logi
+        # Barcha obuna hodisalari logi
         await conn.execute("""
-            CREATE TABLE IF NOT EXISTS subscription_events (
+            CREATE TABLE IF NOT EXISTS sub_logs (
                 id SERIAL PRIMARY KEY,
                 user_id BIGINT,
                 user_name TEXT,
                 channel_id INTEGER,
                 channel_title TEXT,
                 channel_link TEXT,
-                event_type TEXT,
+                event TEXT,
                 event_time TIMESTAMP DEFAULT NOW()
             )
         """)
@@ -159,9 +162,7 @@ async def add_movie(name, year, description, file_id, price):
 
 async def user_has_movie(user_id: int, movie_id: int):
     async with db_pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT id FROM purchases WHERE user_id=$1 AND movie_id=$2", user_id, movie_id
-        )
+        row = await conn.fetchrow("SELECT id FROM purchases WHERE user_id=$1 AND movie_id=$2", user_id, movie_id)
         return row is not None
 
 async def buy_movie(user_id: int, movie_id: int, price: int):
@@ -195,142 +196,224 @@ async def add_required_channel(link: str, title: str = "Kanal"):
 async def remove_required_channel(channel_id: int):
     async with db_pool.acquire() as conn:
         await conn.execute("DELETE FROM required_channels WHERE id=$1", channel_id)
+        await conn.execute("DELETE FROM user_sub_status WHERE channel_id=$1", channel_id)
 
-def is_telegram_channel(link: str) -> bool:
-    """Link Telegram kanaliga tegishlimi?"""
+def is_telegram_link(link: str) -> bool:
     return 't.me/' in link or 'telegram.me/' in link
 
-async def check_telegram_subscription(user_id: int, link: str) -> bool:
-    """Telegram kanalga obuna tekshirish (API orqali)."""
+def extract_tg_username(link: str):
+    """Link dan @username chiqaradi. Invite link bo'lsa None qaytaradi."""
     try:
         if 't.me/' in link:
-            username = link.split('t.me/')[-1].strip().strip('/')
+            uname = link.split('t.me/')[-1].strip().strip('/')
         elif 'telegram.me/' in link:
-            username = link.split('telegram.me/')[-1].strip().strip('/')
+            uname = link.split('telegram.me/')[-1].strip().strip('/')
         else:
-            return False
+            return None
+        if uname.startswith('+') or '/' in uname or not uname:
+            return None
+        return f"@{uname}"
+    except:
+        return None
 
-        if username.startswith('+') or '/' in username:
-            return False
-
-        member = await bot.get_chat_member(f"@{username}", user_id)
-        if member.status in ['left', 'kicked', 'banned']:
-            return False
-        return True
+# ===================================================================
+# ASOSIY TEKSHIRISH: Telegram API orqali REAL VAQTDA foydalanuvchi ID
+# Hech qanday kesh yo'q — har safar to'g'ridan-to'g'ri API ga so'rov
+# ===================================================================
+async def check_tg_sub_api(user_id: int, link: str) -> bool:
+    """
+    Telegram get_chat_member API orqali foydalanuvchi ID sini tekshiradi.
+    True  = obuna bo'lgan (member, administrator, creator)
+    False = obuna bo'lmagan (left, kicked, banned) yoki xato
+    """
+    username = extract_tg_username(link)
+    if not username:
+        logger.warning(f"Invite link yoki noto'g'ri format: {link}")
+        return False
+    try:
+        member = await bot.get_chat_member(username, user_id)
+        result = member.status not in ('left', 'kicked', 'banned')
+        logger.info(f"check_tg_sub_api: user={user_id} channel={username} status={member.status} result={result}")
+        return result
     except Exception as e:
-        logger.warning(f"Telegram kanal tekshirishda xato: {e}")
+        logger.warning(f"get_chat_member xato ({username}, {user_id}): {e}")
         return False
 
-async def check_external_confirmation(user_id: int, channel_id: int) -> bool:
-    """Tashqi kanal (Instagram va h.k.) uchun DB dan tasdiqlash tekshirish."""
+async def get_external_confirmed(user_id: int, channel_id: int) -> bool:
+    """Tashqi kanal (Instagram va h.k.) uchun DB dagi tasdiqlash holatini qaytaradi."""
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT confirmed_at FROM user_channel_confirmations WHERE user_id=$1 AND channel_id=$2",
+            "SELECT is_subscribed FROM user_sub_status WHERE user_id=$1 AND channel_id=$2",
             user_id, channel_id
         )
-        return row is not None
+        return bool(row and row['is_subscribed'])
 
-async def confirm_external_channel(user_id: int, channel_id: int):
-    """Tashqi kanal uchun tasdiqlashni DB ga yozish."""
+async def set_external_confirmed(user_id: int, channel_id: int):
+    """Tashqi kanal uchun tasdiqlashni DB ga yozadi."""
+    now = datetime.now()
     async with db_pool.acquire() as conn:
         await conn.execute("""
-            INSERT INTO user_channel_confirmations (user_id, channel_id, confirmed_at)
-            VALUES ($1, $2, NOW())
-            ON CONFLICT (user_id, channel_id) DO UPDATE SET confirmed_at = NOW()
-        """, user_id, channel_id)
+            INSERT INTO user_sub_status (user_id, channel_id, is_subscribed, last_checked, subscribed_at)
+            VALUES ($1, $2, TRUE, $3, $3)
+            ON CONFLICT (user_id, channel_id) DO UPDATE
+            SET is_subscribed = TRUE, last_checked = $3,
+                subscribed_at = COALESCE(user_sub_status.subscribed_at, $3)
+        """, user_id, channel_id, now)
 
-async def log_subscription_event(user_id: int, user_name: str, channel_id: int,
-                                  channel_title: str, channel_link: str, event_type: str):
-    """Obuna hodisasini DB ga yozish."""
+# ===================================================================
+# HOLAT KUZATISH VA LOGLASH
+# Oldingi holat bilan solishtiradi, o'zgarsa — log yozadi va admin xabardor qiladi
+# ===================================================================
+async def track_and_log(user_id: int, user_name: str, channel: dict, is_sub: bool):
+    """Obuna holatini DB ga yozadi, o'zgarish bo'lsa log qiladi."""
+    ch_id = channel['id']
+    ch_title = channel['title']
+    ch_link = channel['link']
+    now = datetime.now()
+
     async with db_pool.acquire() as conn:
-        await conn.execute("""
-            INSERT INTO subscription_events 
-            (user_id, user_name, channel_id, channel_title, channel_link, event_type)
-            VALUES ($1, $2, $3, $4, $5, $6)
-        """, user_id, user_name, channel_id, channel_title, channel_link, event_type)
+        # Oldingi holatni olamiz
+        prev = await conn.fetchrow(
+            "SELECT is_subscribed FROM user_sub_status WHERE user_id=$1 AND channel_id=$2",
+            user_id, ch_id
+        )
+        prev_status = prev['is_subscribed'] if prev else None
 
-async def notify_admin_subscription(user_id: int, user_name: str, subscribed_channels: list, not_subscribed_channels: list):
-    """Adminga obuna holati haqida xabar yuborish."""
-    try:
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        text = f"📊 <b>Obuna Tekshiruvi</b>\n"
-        text += f"🕐 Vaqt: {now}\n"
-        text += f"👤 Foydalanuvchi: <b>{user_name}</b>\n"
-        text += f"🔑 ID: <code>{user_id}</code>\n\n"
-
-        if subscribed_channels:
-            text += "✅ <b>Obuna bo'ldi:</b>\n"
-            for ch in subscribed_channels:
-                text += f"  • <a href='{ch['link']}'>{ch['title']}</a>\n"
-
-        if not_subscribed_channels:
-            text += "\n❌ <b>Obuna bo'lmadi:</b>\n"
-            for ch in not_subscribed_channels:
-                text += f"  • <a href='{ch['link']}'>{ch['title']}</a>\n"
-
-        await bot.send_message(ADMIN_ID, text, parse_mode="HTML", disable_web_page_preview=True)
-    except Exception as e:
-        logger.warning(f"Admin xabardorlikda xato: {e}")
-
-async def get_unsubscribed_channels(user_id: int) -> list:
-    """Foydalanuvchi obuna bo'lmagan kanallar ro'yxati."""
-    channels = await get_required_channels()
-    unsubscribed = []
-    for channel in channels:
-        link = channel['link']
-        if is_telegram_channel(link):
-            is_sub = await check_telegram_subscription(user_id, link)
+        # Yangi holatni yozamiz
+        if is_sub:
+            await conn.execute("""
+                INSERT INTO user_sub_status (user_id, channel_id, is_subscribed, last_checked, subscribed_at)
+                VALUES ($1, $2, TRUE, $3, $3)
+                ON CONFLICT (user_id, channel_id) DO UPDATE
+                SET is_subscribed = TRUE, last_checked = $3,
+                    subscribed_at = CASE WHEN user_sub_status.is_subscribed = FALSE OR user_sub_status.subscribed_at IS NULL
+                                         THEN $3 ELSE user_sub_status.subscribed_at END
+            """, user_id, ch_id, now)
         else:
-            # Instagram, YouTube va boshqalar — DB dan tekshirish
-            is_sub = await check_external_confirmation(user_id, channel['id'])
+            await conn.execute("""
+                INSERT INTO user_sub_status (user_id, channel_id, is_subscribed, last_checked, unsubscribed_at)
+                VALUES ($1, $2, FALSE, $3, $3)
+                ON CONFLICT (user_id, channel_id) DO UPDATE
+                SET is_subscribed = FALSE, last_checked = $3,
+                    unsubscribed_at = CASE WHEN user_sub_status.is_subscribed = TRUE
+                                           THEN $3 ELSE user_sub_status.unsubscribed_at END
+            """, user_id, ch_id, now)
+
+        # Hodisani aniqlash (faqat o'zgarishda yoki birinchi marta)
+        event = None
+        if prev_status is None and is_sub:
+            event = 'first_subscribed'
+        elif prev_status is None and not is_sub:
+            event = 'checked_not_subscribed'
+        elif prev_status is False and is_sub:
+            event = 'subscribed'
+        elif prev_status is True and not is_sub:
+            event = 'unsubscribed'  # Obunani olib tashladi!
+
+        if event:
+            await conn.execute("""
+                INSERT INTO sub_logs (user_id, user_name, channel_id, channel_title, channel_link, event)
+                VALUES ($1, $2, $3, $4, $5, $6)
+            """, user_id, user_name, ch_id, ch_title, ch_link, event)
+            # Adminga xabar
+            asyncio.create_task(notify_admin_sub(user_id, user_name, ch_title, ch_link, event))
+
+async def notify_admin_sub(user_id: int, user_name: str, ch_title: str, ch_link: str, event: str):
+    """Admin ga obuna o'zgarishi haqida xabar yuboradi."""
+    emoji = {
+        'first_subscribed': '🆕✅',
+        'subscribed': '✅',
+        'checked_not_subscribed': '❌',
+        'unsubscribed': '⚠️🔴',
+    }.get(event, '❓')
+    label = {
+        'first_subscribed': "birinchi marta obuna bo'ldi",
+        'subscribed': "qayta obuna bo'ldi",
+        'checked_not_subscribed': "tekshirdi, obuna emas",
+        'unsubscribed': "OBUNANI OLIB TASHLADI!",
+    }.get(event, event)
+    t = datetime.now().strftime("%d.%m.%Y %H:%M")
+    try:
+        await bot.send_message(
+            ADMIN_ID,
+            f"{emoji} <b>Obuna hodisasi</b> | {t}\n"
+            f"👤 <b>{user_name}</b> (<code>{user_id}</code>)\n"
+            f"📌 <a href='{ch_link}'>{ch_title}</a>\n"
+            f"📋 <b>{label}</b>",
+            parse_mode="HTML",
+            disable_web_page_preview=True
+        )
+    except:
+        pass
+
+# ===================================================================
+# BARCHA KANALLARGA TEKSHIRISH — har bir funksiyada chaqiriladi
+# ===================================================================
+async def check_all_subs(user_id: int, user_name: str) -> list:
+    """
+    Barcha majburiy kanallarga obunani REAL VAQTDA tekshiradi.
+    Telegram: API orqali, Tashqi: DB dan.
+    Qaytaradi: obuna bo'lmagan kanallar ro'yxati.
+    """
+    channels = await get_required_channels()
+    if not channels:
+        return []
+
+    not_subscribed = []
+    for ch in channels:
+        if is_telegram_link(ch['link']):
+            is_sub = await check_tg_sub_api(user_id, ch['link'])
+        else:
+            is_sub = await get_external_confirmed(user_id, ch['id'])
+
+        # DB ga yozamiz va loglaymiz
+        await track_and_log(user_id, user_name, ch, is_sub)
 
         if not is_sub:
-            unsubscribed.append(channel)
+            not_subscribed.append(ch)
 
-    return unsubscribed
+    return not_subscribed
 
-def build_subscription_keyboard(channels: list):
+def build_sub_kb(channels: list) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
     for i, ch in enumerate(channels):
-        emoji = emojis[i % len(emojis)]
-        kb.button(text=f"{emoji} {ch['title']} — A'zo bo'lish", url=ch['link'])
+        kb.button(text=f"{emojis[i % 5]} {ch['title']} — A'zo bo'lish", url=ch['link'])
     kb.button(text="✅ Obunani Tekshirish", callback_data="check_subscription")
     kb.adjust(1)
     return kb.as_markup()
 
-async def send_subscription_message(user_id: int):
+async def send_sub_msg(user_id: int, channels: list):
+    lines = "".join(f"{i}. <a href='{ch['link']}'>{ch['title']}</a>\n" for i, ch in enumerate(channels, 1))
+    text = (
+        "⚠️ <b>Botdan foydalanish uchun\n"
+        "quyidagi kanallarga a'zo bo'ling:</b>\n\n"
+        f"{lines}\n"
+        "A'zo bo'lgach ✅ <b>Obunani Tekshirish</b> tugmasini bosing."
+    )
     try:
-        unsubscribed = await get_unsubscribed_channels(user_id)
-        if not unsubscribed:
-            return False
-        lines = ""
-        for i, ch in enumerate(unsubscribed, 1):
-            lines += f"{i}. <a href='{ch['link']}'>{ch['title']}</a>\n"
-        text = (
-            "⚠️ <b>Botdan foydalanish uchun\n"
-            "quyidagi kanal/sahifalarga a'zo bo'ling:</b>\n\n"
-            f"{lines}\n"
-            "A'zo bo'lgach, <b>✅ Obunani Tekshirish</b> tugmasini bosing."
-        )
         await bot.send_message(
             user_id, text,
-            reply_markup=build_subscription_keyboard(unsubscribed),
+            reply_markup=build_sub_kb(channels),
             parse_mode="HTML",
             disable_web_page_preview=True
         )
-        return True
     except Exception as e:
-        logger.warning(f"send_subscription_message xato: {e}")
-        return False
+        logger.warning(f"send_sub_msg xato: {e}")
 
-async def subscription_check_middleware(m: Message) -> bool:
+async def sub_guard(m: Message) -> bool:
+    """
+    Har bir bot funksiyasining boshida chaqiriladi.
+    True = davom etish | False = obuna talab qilindi.
+    """
     user = await get_user(m.from_user.id)
-    if not user or user['is_banned']:
+    if not user:
         return True
-    unsubscribed = await get_unsubscribed_channels(m.from_user.id)
-    if unsubscribed:
-        await send_subscription_message(m.from_user.id)
+    if user['is_banned']:
+        return True
+    not_sub = await check_all_subs(m.from_user.id, user['name'])
+    if not_sub:
+        await send_sub_msg(m.from_user.id, not_sub)
         return False
     return True
 
@@ -390,7 +473,6 @@ def get_admin_kb():
     builder.adjust(2)
     return builder.as_markup()
 
-# Admin uchun chat tugmasi (FAQAT ADMIN ko'radi)
 def get_admin_end_chat_kb():
     builder = InlineKeyboardBuilder()
     builder.button(text="🔴 Aloqani Tugatish", callback_data="end_chat")
@@ -415,9 +497,9 @@ async def start_cmd(m: Message, state: FSMContext):
     if user:
         if user['is_banned']:
             return await m.answer("🚫 Siz botdan bloklangansiz.")
-        unsubscribed = await get_unsubscribed_channels(m.from_user.id)
-        if unsubscribed:
-            return await send_subscription_message(m.from_user.id)
+        not_sub = await check_all_subs(m.from_user.id, user['name'])
+        if not_sub:
+            return await send_sub_msg(m.from_user.id, not_sub)
         return await m.answer(
             f"🌟 *Xush kelibsiz qaytib, {user['name']}!*\n\n💰 Balansingiz: *{user['coins']} coin*",
             reply_markup=get_main_kb(m.from_user.id), parse_mode="Markdown"
@@ -430,73 +512,41 @@ async def start_cmd(m: Message, state: FSMContext):
         )
         await state.set_state(BotState.waiting_name)
 
-# ================= OBUNA TEKSHIRISH (TUZATILGAN) =================
+# ===================================================================
+# "TEKSHIRISH" TUGMASI
+# Telegram: API orqali, Tashqi: "Tekshirish" bosilganda tasdiqlanadi
+# ===================================================================
 @dp.callback_query(F.data == "check_subscription")
 async def check_sub_callback(c: CallbackQuery):
     await c.answer("⏳ Tekshirilmoqda...", show_alert=False)
 
     user = await get_user(c.from_user.id)
     if not user:
-        await c.message.answer("❌ Avval ro'yxatdan o'ting! /start")
-        return
+        return await c.message.answer("❌ Avval ro'yxatdan o'ting! /start")
     if user['is_banned']:
-        await c.message.answer("🚫 Siz botdan bloklangansiz.")
-        return
+        return await c.message.answer("🚫 Siz botdan bloklangansiz.")
 
     channels = await get_required_channels()
-    subscribed_list = []
-    not_subscribed_list = []
+    not_subscribed = []
 
-    for channel in channels:
-        link = channel['link']
-        if is_telegram_channel(link):
-            # Telegram kanalini API orqali tekshir
-            is_sub = await check_telegram_subscription(c.from_user.id, link)
-            if is_sub:
-                subscribed_list.append(channel)
-            else:
-                not_subscribed_list.append(channel)
+    for ch in channels:
+        if is_telegram_link(ch['link']):
+            # Telegram: API orqali haqiqiy tekshirish
+            is_sub = await check_tg_sub_api(c.from_user.id, ch['link'])
         else:
-            # Instagram, YouTube va boshqalar:
-            # Foydalanuvchi tugmani bosdi = obuna bo'ldi deb hisoblaymiz
-            already_confirmed = await check_external_confirmation(c.from_user.id, channel['id'])
-            if not already_confirmed:
-                # Birinchi marta bosdi — tasdiqlash yozamiz
-                await confirm_external_channel(c.from_user.id, channel['id'])
-                await log_subscription_event(
-                    c.from_user.id, user['name'],
-                    channel['id'], channel['title'], link,
-                    'subscribed_external'
-                )
-            subscribed_list.append(channel)
+            # Tashqi kanal: foydalanuvchi "Tekshirish" tugmasini bosdi = tasdiqlandi
+            is_sub = True
+            await set_external_confirmed(c.from_user.id, ch['id'])
 
-    # Telegram kanallari uchun log yozish
-    for ch in subscribed_list:
-        if is_telegram_channel(ch['link']):
-            await log_subscription_event(
-                c.from_user.id, user['name'],
-                ch['id'], ch['title'], ch['link'],
-                'subscribed'
-            )
-    for ch in not_subscribed_list:
-        await log_subscription_event(
-            c.from_user.id, user['name'],
-            ch['id'], ch['title'], ch['link'],
-            'not_subscribed'
-        )
+        await track_and_log(c.from_user.id, user['name'], ch, is_sub)
 
-    # Adminga xabar yuborish (agar biror narsa bo'lsa)
-    if subscribed_list or not_subscribed_list:
-        await notify_admin_subscription(
-            c.from_user.id, user['name'],
-            subscribed_list, not_subscribed_list
-        )
+        if not is_sub:
+            not_subscribed.append(ch)
 
-    if not not_subscribed_list:
-        # Barcha kanallarga obuna bo'ldi
+    if not not_subscribed:
         try:
             await c.message.edit_text(
-                "✅ <b>Barcha kanal/sahifalarga a'zo bo'ldingiz!</b>\n\nEndi botdan to'liq foydalanishingiz mumkin!",
+                "✅ <b>Barcha kanallarga a'zo bo'ldingiz!</b>\n\nEndi botdan to'liq foydalaning!",
                 parse_mode="HTML"
             )
         except:
@@ -508,24 +558,21 @@ async def check_sub_callback(c: CallbackQuery):
             parse_mode="HTML"
         )
     else:
-        # Hali ba'zi Telegram kanallarga obuna bo'lmagan
-        lines = ""
-        for i, ch in enumerate(not_subscribed_list, 1):
-            lines += f"{i}. <a href='{ch['link']}'>{ch['title']}</a>\n"
+        lines = "".join(f"{i}. <a href='{ch['link']}'>{ch['title']}</a>\n" for i, ch in enumerate(not_subscribed, 1))
         text = (
-            f"❌ <b>Hali {len(not_subscribed_list)} ta kanalga a'zo bo'lmadingiz:</b>\n\n"
+            f"❌ <b>Hali {len(not_subscribed)} ta kanalga a'zo bo'lmadingiz:</b>\n\n"
             f"{lines}\n"
-            f"A'zo bo'lib, <b>✅ Obunani Tekshirish</b> tugmasini qayta bosing."
+            "A'zo bo'lib, <b>✅ Obunani Tekshirish</b> tugmasini qayta bosing."
         )
         try:
             await c.message.edit_text(
-                text, reply_markup=build_subscription_keyboard(not_subscribed_list),
+                text, reply_markup=build_sub_kb(not_subscribed),
                 parse_mode="HTML", disable_web_page_preview=True
             )
         except:
             await bot.send_message(
                 c.from_user.id, text,
-                reply_markup=build_subscription_keyboard(not_subscribed_list),
+                reply_markup=build_sub_kb(not_subscribed),
                 parse_mode="HTML", disable_web_page_preview=True
             )
 
@@ -549,10 +596,13 @@ async def finish_registration(m: Message, state: FSMContext, name: str, phone: s
     channels = await get_required_channels()
     if channels:
         await m.answer(
-            f"✅ *Tabriklaymiz, {name}!*\n\n🎉 Ro'yxatdan o'tdingiz!\n💰 Sizga *100 coin* sovg'a qilindi!\n\n⚠️ Botdan foydalanish uchun kanallarga obuna bo'ling:",
+            f"✅ *Tabriklaymiz, {name}!*\n\n🎉 Ro'yxatdan o'tdingiz!\n💰 Sizga *100 coin* sovg'a qilindi!\n\n"
+            "⚠️ Botdan foydalanish uchun kanallarga obuna bo'ling:",
             parse_mode="Markdown", reply_markup=ReplyKeyboardRemove()
         )
-        await send_subscription_message(m.from_user.id)
+        not_sub = await check_all_subs(m.from_user.id, name)
+        if not_sub:
+            await send_sub_msg(m.from_user.id, not_sub)
     else:
         await m.answer(
             f"✅ *Tabriklaymiz, {name}!*\n\n🎉 Ro'yxatdan o'tdingiz!\n💰 Sizga *100 coin* sovg'a qilindi!",
@@ -572,7 +622,7 @@ async def reg_skip_phone(m: Message, state: FSMContext):
 # ================= KINOLAR =================
 @dp.message(F.text == "🎬 Kinolar Ro'yxati")
 async def show_movies(m: Message):
-    if not await subscription_check_middleware(m):
+    if not await sub_guard(m):
         return
     movies = await get_all_movies()
     if not movies:
@@ -580,17 +630,17 @@ async def show_movies(m: Message):
     text = "🔥 *KINOLAR RO'YXATI* 🔥\n━━━━━━━━━━━━━━━━━━━━\n\n"
     for movie in movies:
         text += f"🎬 *{movie['name']}*\n📅 Yil: {movie['year']}\n💎 Narx: *{movie['price']} coin*\n🆔 Kod: `{movie['id']}`\n────────────────────\n"
-    text += "\n🍿 *Sotib olish uchun: 🎟 Kino Sotib Olish tugmasini bosing!*"
+    text += "\n🍿 *Sotib olish: 🎟 Kino Sotib Olish tugmasi*"
     await m.answer(text, parse_mode="Markdown")
 
 @dp.message(F.text == "🎟 Kino Sotib Olish")
 async def buy_movie_start(m: Message, state: FSMContext):
-    if not await subscription_check_middleware(m):
+    if not await sub_guard(m):
         return
     user = await get_user(m.from_user.id)
     if not user:
         return await m.answer("❌ Avval ro'yxatdan o'ting! /start")
-    await m.answer(f"💰 Balansingiz: *{user['coins']} coin*\n\n🎬 Sotib olmoqchi bo'lgan *kino kodini* yuboring:", parse_mode="Markdown")
+    await m.answer(f"💰 Balansingiz: *{user['coins']} coin*\n\n🎬 Kino *kodini* yuboring:", parse_mode="Markdown")
     await state.set_state(BotState.buying_movie)
 
 @dp.message(BotState.buying_movie)
@@ -615,7 +665,7 @@ async def process_buy(m: Message, state: FSMContext):
     if user['coins'] < movie['price']:
         await state.clear()
         return await m.answer(
-            f"❌ *Coinlar yetarli emas!*\n\n💎 Kino narxi: {movie['price']} coin\n💰 Sizda: {user['coins']} coin",
+            f"❌ *Coinlar yetarli emas!*\n\n💎 Narx: {movie['price']} coin\n💰 Sizda: {user['coins']} coin",
             parse_mode="Markdown"
         )
     kb = InlineKeyboardBuilder()
@@ -623,7 +673,8 @@ async def process_buy(m: Message, state: FSMContext):
     kb.button(text="❌ Bekor qilish", callback_data="cancel_buy")
     kb.adjust(1)
     await m.answer(
-        f"🎬 *{movie['name']}* ({movie['year']})\n\n📝 {movie['description'] or 'Tavsif mavjud emas'}\n\n💎 Narx: *{movie['price']} coin*\n💰 Sizda: *{user['coins']} coin*\n\nSotib olishni tasdiqlaysizmi?",
+        f"🎬 *{movie['name']}* ({movie['year']})\n\n📝 {movie['description'] or 'Tavsif mavjud emas'}\n\n"
+        f"💎 Narx: *{movie['price']} coin*\n💰 Sizda: *{user['coins']} coin*\n\nTasdiqlaysizmi?",
         reply_markup=kb.as_markup(), parse_mode="Markdown"
     )
     await state.clear()
@@ -635,7 +686,7 @@ async def confirm_purchase(c: CallbackQuery):
     movie = await get_movie(movie_id)
     success = await buy_movie(c.from_user.id, movie_id, movie['price'])
     if success:
-        await c.message.edit_text(f"✅ *{movie['name']}* muvaffaqiyatli sotib olindi!\n\nKino yuborilmoqda...", parse_mode="Markdown")
+        await c.message.edit_text(f"✅ *{movie['name']}* sotib olindi!\nKino yuborilmoqda...", parse_mode="Markdown")
         if movie['file_id']:
             if movie['file_id'].startswith('http'):
                 kb = InlineKeyboardBuilder()
@@ -646,17 +697,17 @@ async def confirm_purchase(c: CallbackQuery):
         else:
             await c.message.answer("⚠️ Kino fayli hali qo'shilmagan.")
     else:
-        await c.message.edit_text("❌ Xatolik yuz berdi. Qayta urinib ko'ring!")
+        await c.message.edit_text("❌ Xatolik. Qayta urinib ko'ring!")
 
 @dp.callback_query(F.data == "cancel_buy")
 async def cancel_purchase(c: CallbackQuery):
     await c.answer()
-    await c.message.edit_text("❌ Sotib olish bekor qilindi.")
+    await c.message.edit_text("❌ Bekor qilindi.")
 
 # ================= HISOBIM =================
 @dp.message(F.text == "💰 Hisobim")
 async def my_account(m: Message):
-    if not await subscription_check_middleware(m):
+    if not await sub_guard(m):
         return
     user = await get_user(m.from_user.id)
     if not user:
@@ -668,68 +719,66 @@ async def my_account(m: Message):
         f"👤 *Shaxsiy Kabinet*\n━━━━━━━━━━━━━━━━━━\n\n"
         f"📛 Ism: *{user['name']}*\n📱 Tel: {user['phone'] or 'Kiritilmagan'}\n"
         f"💰 Balans: *{user['coins']} coin*\n🎬 Sotib olingan: *{purchases_count}* ta\n"
-        f"👥 Taklif qilingan: *{referrals_count}* ta\n📅 Sana: *{user['joined_at']}*\n\n🔑 ID: `{m.from_user.id}`",
+        f"👥 Taklif qilingan: *{referrals_count}* ta\n📅 Sana: *{user['joined_at']}*\n\n"
+        f"🔑 ID: `{m.from_user.id}`",
         parse_mode="Markdown"
     )
 
 # ================= KUNLIK BONUS =================
 @dp.message(F.text == "🎁 Kunlik Bonus")
 async def daily_bonus(m: Message):
-    if not await subscription_check_middleware(m):
+    if not await sub_guard(m):
         return
     user = await get_user(m.from_user.id)
     if not user:
         return await m.answer("❌ Avval ro'yxatdan o'ting! /start")
     today = date.today()
     if user['last_bonus'] and user['last_bonus'] >= today:
-        return await m.answer("⏳ *Siz bugun allaqachon bonus oldingiz!*\n\n🔄 Ertaga qaytib keling!", parse_mode="Markdown")
+        return await m.answer("⏳ *Bugun allaqachon bonus oldingiz!*\n\n🔄 Ertaga qaytib keling!", parse_mode="Markdown")
     async with db_pool.acquire() as conn:
         await conn.execute("UPDATE users SET coins = coins + 20, last_bonus = CURRENT_DATE WHERE user_id=$1", m.from_user.id)
     updated = await get_user(m.from_user.id)
-    await m.answer(f"🎉 *Kunlik Bonus!*\n\n✅ Sizga *+20 coin* qo'shildi!\n💰 Yangi balans: *{updated['coins']} coin*", parse_mode="Markdown")
+    await m.answer(f"🎉 *Kunlik Bonus!*\n\n✅ *+20 coin* qo'shildi!\n💰 Balans: *{updated['coins']} coin*", parse_mode="Markdown")
 
 # ================= DO'ST TAKLIF =================
 @dp.message(F.text == "👥 Do'st Taklif Qilish")
 async def referral(m: Message):
-    if not await subscription_check_middleware(m):
+    if not await sub_guard(m):
         return
     bot_info = await bot.get_me()
     ref_link = f"https://t.me/{bot_info.username}?start=ref{m.from_user.id}"
     async with db_pool.acquire() as conn:
         cnt = await conn.fetchval("SELECT COUNT(*) FROM users WHERE referrer_id=$1", m.from_user.id)
     await m.answer(
-        f"👥 *Do'stlarni Taklif Qilish*\n━━━━━━━━━━━━━━━━━━\n\n🔗 Havolangiz:\n`{ref_link}`\n\n💰 Har bir do'st uchun: *+50 coin*\n👤 Taklif qilingan: *{cnt}* ta",
+        f"👥 *Do'stlarni Taklif Qilish*\n━━━━━━━━━━━━━━━━━━\n\n"
+        f"🔗 Havolangiz:\n`{ref_link}`\n\n"
+        f"💰 Har bir do'st uchun: *+50 coin*\n👤 Taklif qilingan: *{cnt}* ta",
         parse_mode="Markdown"
     )
 
-# ================= ADMINGA YOZISH (TUZATILGAN) =================
+# ================= ADMINGA YOZISH =================
 @dp.message(F.text == "✍️ Adminga Yozish")
 async def write_to_admin(m: Message, state: FSMContext):
-    if not await subscription_check_middleware(m):
+    if not await sub_guard(m):
         return
     user = await get_user(m.from_user.id)
     if not user:
         return await m.answer("❌ Avval ro'yxatdan o'ting! /start")
     await state.set_state(BotState.in_active_chat)
     await state.update_data(chat_with=ADMIN_ID, is_user_side=True)
-    # Foydalanuvchiga FAQAT /stop ko'rsatiladi, tugma emas
-    await m.answer(
-        "✍️ *Adminga xabar yozing:*\n\nXabar yuboring. Suhbatni tugatish: /stop",
-        parse_mode="Markdown", reply_markup=ReplyKeyboardRemove()
-    )
+    await m.answer("✍️ *Adminga xabar yozing:*\n\nTugatish: /stop", parse_mode="Markdown", reply_markup=ReplyKeyboardRemove())
     try:
         await bot.send_message(
             ADMIN_ID,
             f"📩 <b>Foydalanuvchi xabar yozmoqda!</b>\n\n"
-            f"👤 Ism: <b>{user['name']}</b>\n"
-            f"🔑 ID: <code>{m.from_user.id}</code>\n\n"
-            f"Javob berish uchun: Admin Panel → 💬 Foydalanuvchi bilan Gaplash",
+            f"👤 <b>{user['name']}</b> | ID: <code>{m.from_user.id}</code>\n\n"
+            "Javob: Admin Panel → 💬 Foydalanuvchi bilan Gaplash",
             parse_mode="HTML"
         )
     except:
         pass
 
-# ================= AKTIV CHAT (TUZATILGAN) =================
+# ================= AKTIV CHAT =================
 @dp.message(BotState.in_active_chat)
 async def active_chat(m: Message, state: FSMContext):
     if m.text and m.text.lower() == "/stop":
@@ -741,19 +790,9 @@ async def active_chat(m: Message, state: FSMContext):
         if partner:
             try:
                 if is_user_side:
-                    # Foydalanuvchi to'xtatdi — adminga xabar
-                    await bot.send_message(
-                        partner,
-                        f"📴 Foydalanuvchi ({m.from_user.id}) suhbatni tugatdi.",
-                        reply_markup=get_admin_kb()
-                    )
+                    await bot.send_message(partner, f"📴 Foydalanuvchi ({m.from_user.id}) suhbatni tugatdi.", reply_markup=get_admin_kb())
                 else:
-                    # Admin to'xtatdi — foydalanuvchiga xabar
-                    await bot.send_message(
-                        partner,
-                        "📴 Admin suhbatni tugatdi.",
-                        reply_markup=get_main_kb(partner)
-                    )
+                    await bot.send_message(partner, "📴 Admin suhbatni tugatdi.", reply_markup=get_main_kb(partner))
             except:
                 pass
         return
@@ -777,14 +816,13 @@ async def active_chat(m: Message, state: FSMContext):
             await bot.send_video(partner, m.video.file_id, caption=f"{prefix}{m.caption or ''}", parse_mode="Markdown")
         elif m.document:
             await bot.send_document(partner, m.document.file_id, caption=f"{prefix}{m.caption or ''}", parse_mode="Markdown")
-
-        # Admin bo'lsa tugma ko'rsatiladi, foydalanuvchi bo'lsa yo'q
+        # Faqat admin uchun tugma
         if not is_user_side:
-            await m.answer("✅ Xabar yuborildi! Tugatish: /stop", reply_markup=get_admin_end_chat_kb())
+            await m.answer("✅ Yuborildi! Tugatish: /stop", reply_markup=get_admin_end_chat_kb())
         else:
-            await m.answer("✅ Xabar yuborildi! Tugatish: /stop")
+            await m.answer("✅ Yuborildi! Tugatish: /stop")
     except Exception as e:
-        await m.answer(f"❌ Xabar yuborilmadi: {e}")
+        await m.answer(f"❌ Yuborilmadi: {e}")
 
 # ================= STATISTIKA =================
 @dp.message(F.text == "📊 Statistika")
@@ -795,7 +833,8 @@ async def show_stats(m: Message):
     await m.answer(
         f"📊 *BOT STATISTIKASI*\n━━━━━━━━━━━━━━━━━━\n\n"
         f"👥 Jami: *{s['total_users']}*\n🆕 Bugun: *{s['today_users']}*\n"
-        f"🚫 Bloklangan: *{s['banned_users']}*\n🎬 Kinolar: *{s['total_movies']}*\n🛒 Sotuvlar: *{s['total_purchases']}*",
+        f"🚫 Bloklangan: *{s['banned_users']}*\n🎬 Kinolar: *{s['total_movies']}*\n"
+        f"🛒 Sotuvlar: *{s['total_purchases']}*",
         parse_mode="Markdown"
     )
 
@@ -830,7 +869,8 @@ async def full_stats(c: CallbackQuery):
     await c.message.edit_text(
         f"📊 *TO'LIQ STATISTIKA*\n━━━━━━━━━━━━━━━━━━\n\n"
         f"👥 Jami: *{s['total_users']}*\n🆕 Bugun: *{s['today_users']}*\n"
-        f"🚫 Bloklangan: *{s['banned_users']}*\n🎬 Kinolar: *{s['total_movies']}*\n🛒 Sotuvlar: *{s['total_purchases']}*",
+        f"🚫 Bloklangan: *{s['banned_users']}*\n🎬 Kinolar: *{s['total_movies']}*\n"
+        f"🛒 Sotuvlar: *{s['total_purchases']}*",
         parse_mode="Markdown", reply_markup=get_admin_kb()
     )
 
@@ -841,32 +881,23 @@ async def admin_sub_logs(c: CallbackQuery):
     if c.from_user.id != ADMIN_ID:
         return
     async with db_pool.acquire() as conn:
-        logs = await conn.fetch("""
-            SELECT user_id, user_name, channel_title, channel_link, event_type, event_time
-            FROM subscription_events
-            ORDER BY event_time DESC
-            LIMIT 30
-        """)
-    if not logs:
-        return await c.message.edit_text(
-            "📋 Hozircha obuna hodisalari yo'q.",
-            reply_markup=get_admin_kb()
+        logs = await conn.fetch(
+            "SELECT user_id, user_name, channel_title, channel_link, event, event_time FROM sub_logs ORDER BY event_time DESC LIMIT 40"
         )
-    emoji_map = {
-        'subscribed': '✅',
-        'subscribed_external': '🌐✅',
-        'not_subscribed': '❌'
-    }
+    if not logs:
+        kb = InlineKeyboardBuilder()
+        kb.button(text="🔙 Orqaga", callback_data="sub_back")
+        return await c.message.edit_text("📋 Hozircha hodisalar yo'q.", reply_markup=kb.as_markup())
+    emojis = {'first_subscribed': '🆕✅', 'subscribed': '✅', 'checked_not_subscribed': '❌', 'unsubscribed': '⚠️🔴'}
     text = "📋 *Oxirgi Obuna Hodisalari*\n━━━━━━━━━━━━━━━━━━\n\n"
     for log in logs:
-        emoji = emoji_map.get(log['event_type'], '❓')
+        emoji = emojis.get(log['event'], '❓')
         t = log['event_time'].strftime("%m-%d %H:%M") if log['event_time'] else ''
-        text += f"{emoji} *{log['user_name']}* (`{log['user_id']}`)\n"
-        text += f"   📌 {log['channel_title']} | 🕐 {t}\n"
+        text += f"{emoji} *{log['user_name']}* (`{log['user_id']}`)\n   📌 {log['channel_title']} | {t}\n"
     kb = InlineKeyboardBuilder()
     kb.button(text="🔙 Orqaga", callback_data="sub_back")
     try:
-        await c.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="Markdown", disable_web_page_preview=True)
+        await c.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="Markdown")
     except:
         await bot.send_message(c.from_user.id, text, parse_mode="Markdown")
 
@@ -877,7 +908,9 @@ async def admin_users_list(c: CallbackQuery):
     if c.from_user.id != ADMIN_ID:
         return
     async with db_pool.acquire() as conn:
-        users = await conn.fetch("SELECT user_id, name, phone, coins, joined_at, is_banned FROM users ORDER BY joined_at DESC LIMIT 50")
+        users = await conn.fetch(
+            "SELECT user_id, name, phone, coins, joined_at, is_banned FROM users ORDER BY joined_at DESC LIMIT 50"
+        )
     if not users:
         return await c.message.answer("📭 Hali foydalanuvchilar yo'q!")
     text = "👥 *FOYDALANUVCHILAR*\n━━━━━━━━━━━━━━━━━━\n\n"
@@ -887,7 +920,6 @@ async def admin_users_list(c: CallbackQuery):
     text += f"\n📊 Ko'rsatildi: *{len(users)}* ta"
     kb = InlineKeyboardBuilder()
     kb.button(text="🔙 Orqaga", callback_data="sub_back")
-    kb.adjust(1)
     try:
         await c.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="Markdown")
     except:
@@ -910,11 +942,11 @@ async def admin_subscription_menu(c: CallbackQuery):
     if channels:
         text += "📋 *Kanallar:*\n"
         for ch in channels:
-            ch_type = "📱 Telegram" if is_telegram_channel(ch['link']) else "🌐 Tashqi"
-            text += f"• [{ch['title']}]({ch['link']}) — {ch_type}\n"
-        text += "\n💡 Tashqi kanallar (Instagram va h.k.) foydalanuvchi 'Tekshirish' tugmasini bosganida avtomatik tasdiqlanadi."
+            t = "📱 TG" if is_telegram_link(ch['link']) else "🌐 Tashqi"
+            text += f"• [{ch['title']}]({ch['link']}) — {t}\n"
+        text += "\n💡 TG: API tekshiruv | Tashqi: foydalanuvchi tasdiqlaydi"
     else:
-        text += "📭 Hozircha kanallar yo'q.\n"
+        text += "📭 Hozircha kanallar yo'q."
     await c.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="Markdown", disable_web_page_preview=True)
 
 @dp.callback_query(F.data == "sub_back")
@@ -929,11 +961,9 @@ async def sub_add_start(c: CallbackQuery, state: FSMContext):
         return
     await c.message.answer(
         "🔗 *Kanal linkini yuboring:*\n\n"
-        "Telegram misoli:\n• `https://t.me/kanalnom`\n\n"
-        "Tashqi (Instagram va h.k.) misoli:\n• `https://instagram.com/akkountnom`\n\n"
-        "💡 <b>Eslatma:</b> Telegram kanallari API orqali tekshiriladi (bot admin bo'lishi kerak). "
-        "Instagram va boshqa tashqi kanallar foydalanuvchi 'Tekshirish' bosganida tasdiqlanadi.",
-        parse_mode="HTML"
+        "📱 Telegram: `https://t.me/kanalnom`\n"
+        "🌐 Tashqi: `https://instagram.com/nom`",
+        parse_mode="Markdown"
     )
     await state.set_state(BotState.adding_sub_link)
 
@@ -954,41 +984,35 @@ async def sub_get_title(m: Message, state: FSMContext):
         title = m.text.strip()
         await add_required_channel(link, title)
         await state.clear()
-        ch_type = "📱 Telegram (API orqali tekshiriladi)" if is_telegram_channel(link) else "🌐 Tashqi (foydalanuvchi tasdiqlaydi)"
+        note = "⚠️ Botni kanalga admin qilib qo'shing!" if is_telegram_link(link) else "✅ Tashqi kanal — foydalanuvchi tasdiqlaydi."
         await m.answer(
-            f"✅ <b>Kanal qo'shildi!</b>\n\n"
-            f"📛 Nomi: <b>{title}</b>\n"
-            f"🔗 Link: <code>{link}</code>\n"
-            f"📌 Turi: {ch_type}\n\n"
-            f"{'⚠️ <b>Muhim:</b> Botni kanalga admin qilib qo\'shing!' if is_telegram_channel(link) else ''}",
-            parse_mode="HTML", disable_web_page_preview=True
+            f"✅ <b>Kanal qo'shildi!</b>\n\n📛 {title}\n🔗 <code>{link}</code>\n\n{note}",
+            parse_mode="HTML", disable_web_page_preview=True, reply_markup=get_admin_kb()
         )
-        asyncio.create_task(broadcast_subscription_to_all(m.from_user.id))
+        asyncio.create_task(broadcast_new_sub())
     except Exception as e:
         await state.clear()
         await m.answer(f"❌ Xatolik: {e}")
 
-async def broadcast_subscription_to_all(admin_id: int):
+async def broadcast_new_sub():
+    """Yangi kanal qo'shilganda barcha foydalanuvchilarga obuna xabari."""
     try:
         all_users = await get_all_users()
-        sent, failed = 0, 0
         for u in all_users:
-            if u['user_id'] == admin_id:
+            if u['user_id'] == ADMIN_ID:
                 continue
             try:
-                result = await send_subscription_message(u['user_id'])
-                if result:
-                    sent += 1
+                user = await get_user(u['user_id'])
+                if not user:
+                    continue
+                not_sub = await check_all_subs(u['user_id'], user['name'])
+                if not_sub:
+                    await send_sub_msg(u['user_id'], not_sub)
                 await asyncio.sleep(0.05)
             except:
-                failed += 1
-        await bot.send_message(
-            admin_id,
-            f"📢 *Obuna xabari yuborildi!*\n\n✅ Muvaffaqiyatli: *{sent}* ta\n❌ Yuborilmadi: *{failed}* ta",
-            parse_mode="Markdown", reply_markup=get_admin_kb()
-        )
+                pass
     except Exception as e:
-        logger.error(f"broadcast xato: {e}")
+        logger.error(f"broadcast_new_sub xato: {e}")
 
 @dp.callback_query(F.data == "sub_del_list")
 async def sub_del_list(c: CallbackQuery):
@@ -1012,7 +1036,6 @@ async def sub_del_confirm(c: CallbackQuery):
     channel_id = int(c.data.split("_")[2])
     async with db_pool.acquire() as conn:
         ch = await conn.fetchrow("SELECT title FROM required_channels WHERE id=$1", channel_id)
-        await conn.execute("DELETE FROM user_channel_confirmations WHERE channel_id=$1", channel_id)
     await remove_required_channel(channel_id)
     await c.answer(f"✅ '{ch['title'] if ch else 'Kanal'}' o'chirildi!", show_alert=True)
     channels = await get_required_channels()
@@ -1021,7 +1044,7 @@ async def sub_del_confirm(c: CallbackQuery):
         kb.button(text=f"🗑 {ch2['title']}", callback_data=f"sub_del_{ch2['id']}")
     kb.button(text="🔙 Orqaga", callback_data="adm_subscription")
     kb.adjust(1)
-    text = "🗑 *O'chirmoqchi bo'lgan kanalni tanlang:*" if channels else "📭 *Barcha kanallar o'chirildi.*"
+    text = "🗑 *Kanal tanlang:*" if channels else "📭 *Barcha kanallar o'chirildi.*"
     await c.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="Markdown")
 
 # ================= COIN QO'SHISH =================
@@ -1156,7 +1179,7 @@ async def save_kino(m: Message, state: FSMContext):
     new_id = await add_movie(data['k_name'], data['k_year'], data.get('k_desc', ''), data.get('k_file'), int(m.text))
     await state.clear()
     await m.answer(
-        f"✅ *Kino qo'shildi!*\n\n🆔 Kod: `{new_id}`\n🎬 Nomi: {data['k_name']}\n📅 Yil: {data['k_year']}\n💰 Narx: {m.text} coin",
+        f"✅ *Kino qo'shildi!*\n\n🆔 Kod: `{new_id}`\n🎬 {data['k_name']}\n📅 {data['k_year']}\n💰 {m.text} coin",
         parse_mode="Markdown", reply_markup=get_admin_kb()
     )
 
@@ -1262,7 +1285,7 @@ async def process_unban(m: Message, state: FSMContext):
         pass
     await m.answer(f"✅ Foydalanuvchi (ID: `{uid}`) blokdan chiqarildi!", parse_mode="Markdown", reply_markup=get_admin_kb())
 
-# ================= ADMIN CHAT (TO'LIQ TUZATILGAN) =================
+# ================= ADMIN CHAT =================
 @dp.callback_query(F.data == "adm_start_chat")
 async def admin_chat_init(c: CallbackQuery, state: FSMContext):
     await c.answer()
@@ -1279,49 +1302,33 @@ async def admin_chat_init(c: CallbackQuery, state: FSMContext):
 @dp.message(BotState.admin_chat_target)
 async def admin_ask_user(m: Message, state: FSMContext):
     if not m.text or not m.text.strip().isdigit():
-        return await m.answer("⚠️ Faqat ID raqamini kiriting! (masalan: 123456789)")
-
+        return await m.answer("⚠️ Faqat ID raqamini kiriting!")
     target_id = int(m.text.strip())
-
     if target_id == ADMIN_ID:
         return await m.answer("⚠️ O'zingizga xabar yubora olmaysiz!")
-
     target_user = await get_user(target_id)
     if not target_user:
         await state.clear()
-        return await m.answer(
-            f"❌ ID: `{target_id}` da foydalanuvchi topilmadi!\n\nFoydalanuvchi avval botni ishga tushirgan bo'lishi kerak.",
-            parse_mode="Markdown"
-        )
-
-    # Foydalanuvchiga rozilik so'raymiz
+        return await m.answer(f"❌ ID: `{target_id}` foydalanuvchi topilmadi!", parse_mode="Markdown")
     kb = InlineKeyboardBuilder()
     kb.button(text="✅ Ha, gaplashaman", callback_data=f"chat_yes_{ADMIN_ID}")
     kb.button(text="❌ Yo'q, rad etaman", callback_data=f"chat_no_{ADMIN_ID}")
     kb.adjust(1)
-
     try:
         await bot.send_message(
             target_id,
-            f"🔔 <b>Admin siz bilan bog'lanmoqchi!</b>\n\nSuhbatga rozimisiz?",
-            reply_markup=kb.as_markup(),
-            parse_mode="HTML"
+            "🔔 <b>Admin siz bilan bog'lanmoqchi!</b>\n\nSuhbatga rozimisiz?",
+            reply_markup=kb.as_markup(), parse_mode="HTML"
         )
-        # Admin kutish holatiga o'tadi — foydalanuvchi rozilik bildirgandan keyin xabar yubora oladi
         await state.set_state(BotState.in_active_chat)
-        await state.update_data(chat_with=target_id, is_user_side=False, waiting_accept=True)
+        await state.update_data(chat_with=target_id, is_user_side=False)
         await m.answer(
-            f"✅ So'rov yuborildi!\n\n"
-            f"👤 Foydalanuvchi: *{target_user['name']}*\n"
-            f"🔑 ID: `{target_id}`\n\n"
-            f"⏳ Foydalanuvchi rozilik bildirishini kuting...\n"
-            f"Bekor qilish: /stop",
-            parse_mode="Markdown",
-            reply_markup=get_admin_end_chat_kb()  # FAQAT ADMIN ko'radi
+            f"✅ So'rov yuborildi!\n\n👤 *{target_user['name']}* | ID: `{target_id}`\n\n⏳ Javob kutilmoqda...\nBekor qilish: /stop",
+            parse_mode="Markdown", reply_markup=get_admin_end_chat_kb()
         )
     except Exception as e:
         await state.clear()
-        await m.answer(f"❌ Xabar yuborib bo'lmadi: {e}\n\nFoydalanuvchi botni bloklagan bo'lishi mumkin.")
+        await m.answer(f"❌ Xabar yuborib bo'lmadi: {e}")
 
 @dp.callback_query(F.data.startswith("chat_yes_"))
 async def chat_accept(c: CallbackQuery, state: FSMContext):
@@ -1329,19 +1336,13 @@ async def chat_accept(c: CallbackQuery, state: FSMContext):
     admin_id = int(c.data.split("_")[2])
     await state.set_state(BotState.in_active_chat)
     await state.update_data(chat_with=admin_id, is_user_side=True)
-    # Foydalanuvchiga TUGMA ko'rsatilmaydi, faqat /stop
-    await c.message.edit_text(
-        "✅ <b>Aloqa o'rnatildi!</b>\n\n"
-        "💬 Xabaringizni yozing.\n"
-        "Suhbatni tugatish: /stop",
-        parse_mode="HTML"
-    )
+    # Foydalanuvchiga FAQAT /stop, tugma yo'q
+    await c.message.edit_text("✅ <b>Aloqa o'rnatildi!</b>\n\n💬 Xabaringizni yozing.\nTugatish: /stop", parse_mode="HTML")
     try:
         await bot.send_message(
             admin_id,
-            f"✅ *Foydalanuvchi ({c.from_user.id}) suhbatga kirdi!*\n\nEndi xabar yubora olasiz.\nTugatish: /stop yoki quyidagi tugma:",
-            parse_mode="Markdown",
-            reply_markup=get_admin_end_chat_kb()  # FAQAT ADMIN ko'radi
+            f"✅ *Foydalanuvchi ({c.from_user.id}) suhbatga kirdi!*\nXabar yubora olasiz.\nTugatish: /stop",
+            parse_mode="Markdown", reply_markup=get_admin_end_chat_kb()
         )
     except:
         pass
@@ -1352,21 +1353,14 @@ async def chat_reject(c: CallbackQuery):
     admin_id = int(c.data.split("_")[2])
     await c.message.edit_text("❌ Siz suhbatni rad etdingiz.")
     try:
-        await bot.send_message(
-            admin_id,
-            f"😔 Foydalanuvchi ({c.from_user.id}) suhbatlashishni istamadi.",
-            reply_markup=get_admin_kb()
-        )
+        await bot.send_message(admin_id, f"😔 Foydalanuvchi ({c.from_user.id}) suhbatlashishni istamadi.", reply_markup=get_admin_kb())
     except:
         pass
 
-# ================= ALOQANI TUGATISH (FAQAT ADMIN) =================
 @dp.callback_query(F.data == "end_chat")
 async def end_chat_callback(c: CallbackQuery, state: FSMContext):
-    # Faqat admin ishlata oladi
     if c.from_user.id != ADMIN_ID:
-        await c.answer("❌ Bu tugma faqat admin uchun!", show_alert=True)
-        return
+        return await c.answer("❌ Bu tugma faqat admin uchun!", show_alert=True)
     await c.answer()
     data = await state.get_data()
     partner = data.get("chat_with")
@@ -1382,7 +1376,7 @@ async def end_chat_callback(c: CallbackQuery, state: FSMContext):
         except:
             pass
 
-# ================= BLOKLANGAN FILTRI =================
+# ================= GLOBAL HANDLER =================
 @dp.message()
 async def global_message_handler(m: Message, state: FSMContext):
     user = await get_user(m.from_user.id)
