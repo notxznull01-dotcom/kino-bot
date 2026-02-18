@@ -189,74 +189,80 @@ async def remove_required_channel(channel_id: int):
     async with db_pool.acquire() as conn:
         await conn.execute("DELETE FROM required_channels WHERE id=$1", channel_id)
 
-async def check_user_subscribed(user_id: int) -> bool:
-    channels = await get_required_channels()
-    if not channels:
-        return True
-    for channel in channels:
-        link = channel['link']
-        if 't.me/' in link or 'telegram.me/' in link:
-            username = None
-            if 't.me/' in link:
-                username = link.split('t.me/')[-1].strip().strip('/')
-            elif 'telegram.me/' in link:
-                username = link.split('telegram.me/')[-1].strip().strip('/')
-            if username and not username.startswith('+'):
-                try:
-                    member = await bot.get_chat_member(f"@{username}", user_id)
-                    if member.status in ['left', 'kicked', 'banned']:
-                        return False
-                except Exception:
-                    pass
-    return True
-
 # =====================================================================
-# OBUNA — har bir kanal alohida tekshiriladi
+# TUZATILGAN: Obuna tekshiruvi — faqat Telegram kanallarini API orqali
+# tekshiradi. Instagram/boshqa linklar — foydalanuvchi o'zi tasdiqlashi kerak.
 # =====================================================================
 async def get_unsubscribed_channels(user_id: int) -> list:
-    """Foydalanuvchi obuna bo'lmagan kanallar ro'yxatini qaytaradi"""
+    """
+    Foydalanuvchi obuna bo'lmagan kanallar ro'yxatini qaytaradi.
+    - Telegram kanallar (@username): bot API orqali tekshiradi
+    - Boshqa linklar (Instagram, YouTube va h.k.): tekshirib bo'lmaydi,
+      shuning uchun har doim "obuna bo'lmagan" deb qaytariladi —
+      foydalanuvchi o'zi tasdiqlashi kerak.
+    """
     channels = await get_required_channels()
     unsubscribed = []
     for channel in channels:
         link = channel['link']
-        is_subscribed = True
+        is_subscribed = False  # Default: tekshirilmagan = obuna bo'lmagan
+
+        # Telegram kanal tekshiruvi
         if 't.me/' in link or 'telegram.me/' in link:
             username = None
             if 't.me/' in link:
                 username = link.split('t.me/')[-1].strip().strip('/')
             elif 'telegram.me/' in link:
                 username = link.split('telegram.me/')[-1].strip().strip('/')
+
+            # Invite link bo'lsa tekshirib bo'lmaydi
             if username and not username.startswith('+'):
                 try:
                     member = await bot.get_chat_member(f"@{username}", user_id)
-                    if member.status in ['left', 'kicked', 'banned']:
-                        is_subscribed = False
-                except Exception:
-                    pass
+                    if member.status not in ['left', 'kicked', 'banned']:
+                        is_subscribed = True
+                except Exception as e:
+                    logger.warning(f"Kanal tekshirishda xato (@{username}): {e}")
+                    # Xato bo'lsa obuna bo'lmagan deb hisoblaymiz
+                    is_subscribed = False
+            else:
+                # Invite link — tekshirib bo'lmaydi, obuna bo'lmagan deb ko'rsatamiz
+                is_subscribed = False
+        else:
+            # Instagram, YouTube va boshqa platformalar — tekshirib bo'lmaydi
+            # Foydalanuvchi botga kirguncha bu kanallar ko'rsatiladi
+            is_subscribed = False
+
         if not is_subscribed:
             unsubscribed.append(channel)
+
     return unsubscribed
 
-def build_subscription_keyboard(unsubscribed_channels: list):
-    """Obuna bo'lmagan kanallar uchun tugmalar yaratadi"""
+def build_subscription_keyboard(channels: list):
+    """Obuna bo'lish tugmalari"""
     kb = InlineKeyboardBuilder()
     emojis = ["✖", "❌", "🔴", "⛔", "🚫"]
-    for i, ch in enumerate(unsubscribed_channels):
+    for i, ch in enumerate(channels):
         emoji = emojis[i % len(emojis)]
-        kb.button(text=f"{emoji} A'zo bo'lish", url=ch['link'])
-    kb.button(text="🔄 Tekshirish", callback_data="check_subscription")
+        kb.button(text=f"{emoji} {ch['title']}ga a'zo bo'lish", url=ch['link'])
+    kb.button(text="🔄 Obunani Tekshirish", callback_data="check_subscription")
     kb.adjust(1)
     return kb.as_markup()
 
 async def send_subscription_message(user_id: int):
-    """Barcha obuna bo'lmagan kanallarni ko'rsatadi"""
+    """Obuna bo'lmagan kanallarni ko'rsatadi"""
     try:
         all_channels = await get_required_channels()
         if not all_channels:
             return
         unsubscribed = await get_unsubscribed_channels(user_id)
         channels_to_show = unsubscribed if unsubscribed else all_channels
-        text = "⚠️ <b>Botdan to'liq foydalanish uchun\nquyidagi kanallarimizga obuna bo'ling!</b>"
+
+        text = (
+            "⚠️ <b>Botdan to'liq foydalanish uchun\n"
+            "quyidagi kanal/akkauntlarga obuna bo'ling!</b>\n\n"
+            "Obuna bo'lgach, <b>🔄 Obunani Tekshirish</b> tugmasini bosing."
+        )
         await bot.send_message(
             user_id,
             text,
@@ -323,6 +329,12 @@ def get_admin_kb():
     builder.adjust(2)
     return builder.as_markup()
 
+# Admin chat uchun "Aloqani Tugatish" tugmasi
+def get_end_chat_kb():
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔴 Aloqani Tugatish", callback_data="end_chat")
+    return builder.as_markup()
+
 # ================= OBUNA TEKSHIRISH MIDDLEWARE =================
 async def subscription_check_middleware(m: Message) -> bool:
     user = await get_user(m.from_user.id)
@@ -386,14 +398,13 @@ async def check_sub_callback(c: CallbackQuery):
 
     await c.answer("🔄 Tekshirilmoqda...")
 
-    # Har bir kanal alohida tekshiriladi
     unsubscribed = await get_unsubscribed_channels(c.from_user.id)
 
     if not unsubscribed:
-        # Hammaga obuna bo'lgan — botni ochish
         try:
             await c.message.edit_text(
-                "✅ <b>Rahmat! Obuna tasdiqlandi!</b>\n\nEndi botdan to'liq foydalanishingiz mumkin!",
+                "✅ <b>Rahmat! Barcha kanallarga obuna tasdiqlandi!</b>\n\n"
+                "Endi botdan to'liq foydalanishingiz mumkin!",
                 parse_mode="HTML"
             )
         except:
@@ -405,10 +416,10 @@ async def check_sub_callback(c: CallbackQuery):
             parse_mode="HTML"
         )
     else:
-        # Hali obuna bo'lmagan kanallar bor — faqat ularni ko'rsat
+        # Hali obuna bo'lmagan kanallar bor
         text = (
-            f"⚠️ <b>Hali {len(unsubscribed)} ta kanalga obuna bo'lmadingiz!</b>\n"
-            f"Quyidagi kanallarga obuna bo'lib, <b>Tekshirish</b> tugmasini bosing:"
+            f"⚠️ <b>Hali {len(unsubscribed)} ta kanal/akkountga obuna bo'lmadingiz!</b>\n\n"
+            f"Quyidagilarga obuna bo'lib, <b>🔄 Obunani Tekshirish</b> tugmasini bosing:"
         )
         try:
             await c.message.edit_text(
@@ -437,7 +448,6 @@ async def reg_name(m: Message, state: FSMContext):
     await state.set_state(BotState.waiting_phone)
 
 async def finish_registration(m: Message, state: FSMContext, name: str, phone: str = None):
-    """Ro'yxatdan o'tishni yakunlaydi va obuna tekshiradi"""
     data = await state.get_data()
     await create_user(m.from_user.id, name, phone, data.get('referrer_id'))
     await state.clear()
@@ -678,25 +688,61 @@ async def write_to_admin(m: Message, state: FSMContext):
     if not user:
         return await m.answer("❌ Avval ro'yxatdan o'ting! /start")
     await m.answer(
-        "✍️ *Adminga xabar yozing:*\n\nXabaringizni yuboring, admin tez orada javob beradi!",
+        "✍️ *Adminga xabar yozing:*\n\nXabaringizni yuboring, admin tez orada javob beradi!\n\n"
+        "Suhbatni tugatish uchun /stop yozing.",
         parse_mode="Markdown",
         reply_markup=ReplyKeyboardRemove()
     )
     await state.set_state(BotState.in_active_chat)
     await state.update_data(chat_with=ADMIN_ID, is_user_side=True)
+    # Adminga xabar — foydalanuvchi yozmoqda
+    user_obj = await get_user(m.from_user.id)
+    name = user_obj['name'] if user_obj else m.from_user.full_name
+    try:
+        await bot.send_message(
+            ADMIN_ID,
+            f"📩 *Foydalanuvchi xabar yozmoqda!*\n\n"
+            f"👤 Ism: *{name}*\n"
+            f"🔑 ID: `{m.from_user.id}`\n\n"
+            f"Javob berish uchun Admin Paneldan 'Foydalanuvchi bilan Gaplash' tugmasini bosing yoki ID: `{m.from_user.id}` ga yozing.",
+            parse_mode="Markdown"
+        )
+    except:
+        pass
 
+# =====================================================================
+# TUZATILGAN: in_active_chat — ikki tomonlama chat + /stop komandasi
+# =====================================================================
 @dp.message(BotState.in_active_chat)
 async def active_chat(m: Message, state: FSMContext):
     if m.text and m.text.lower() == "/stop":
+        data = await state.get_data()
+        partner = data.get("chat_with")
+        is_user_side = data.get("is_user_side", True)
         await state.clear()
-        return await m.answer("📴 Suhbat yakunlandi.", reply_markup=get_main_kb(m.from_user.id))
+        await m.answer("📴 Suhbat yakunlandi. Aloqa uzildi.", reply_markup=get_main_kb(m.from_user.id))
+        # Hamkorga ham xabar
+        if partner:
+            try:
+                if is_user_side:
+                    await bot.send_message(partner, f"📴 Foydalanuvchi ({m.from_user.id}) suhbatni tugatdi.")
+                else:
+                    await bot.send_message(partner, "📴 Admin suhbatni tugatdi. Aloqa uzildi.", reply_markup=get_main_kb(partner))
+            except:
+                pass
+        return
+
     data = await state.get_data()
     partner = data.get("chat_with")
     is_user_side = data.get("is_user_side", True)
     user = await get_user(m.from_user.id)
     name = user['name'] if user else m.from_user.full_name
+
     if partner:
-        prefix = f"📩 *Foydalanuvchi:* {name} (ID: `{m.from_user.id}`)\n\n" if is_user_side else f"👑 *Admin javobi:*\n\n"
+        if is_user_side:
+            prefix = f"📩 *Foydalanuvchi:* {name} (ID: `{m.from_user.id}`)\n\n"
+        else:
+            prefix = f"👑 *Admin javobi:*\n\n"
         try:
             if m.text:
                 await bot.send_message(partner, f"{prefix}{m.text}", parse_mode="Markdown")
@@ -706,7 +752,7 @@ async def active_chat(m: Message, state: FSMContext):
                 await bot.send_video(partner, m.video.file_id, caption=f"{prefix}{m.caption or ''}", parse_mode="Markdown")
             elif m.document:
                 await bot.send_document(partner, m.document.file_id, caption=f"{prefix}{m.caption or ''}", parse_mode="Markdown")
-            await m.answer("✅ Xabar yuborildi!")
+            await m.answer("✅ Xabar yuborildi! Tugatish: /stop")
         except Exception as e:
             await m.answer(f"❌ Xabar yuborilmadi: {e}")
 
@@ -860,44 +906,33 @@ async def sub_get_link(m: Message, state: FSMContext):
         )
     await state.update_data(sub_link=link)
     await m.answer(
-        "📝 *Kanal nomini kiriting:*\n\n(Masalan: Kino Kanal)",
+        "📝 *Kanal/akkount nomini kiriting:*\n\n(Masalan: Kino Kanal, Instagram Sahifamiz)",
         parse_mode="Markdown"
     )
     await state.set_state(BotState.adding_sub_title)
 
-# =====================================================================
-# TUZATILGAN: sub_get_title — tasdiq xabari + barcha userlarga yuborish
-# =====================================================================
 @dp.message(BotState.adding_sub_title)
 async def sub_get_title(m: Message, state: FSMContext):
     try:
         data = await state.get_data()
         link = data.get('sub_link', '')
         title = m.text.strip()
-
-        # Kanalga qo'shish
         await add_required_channel(link, title)
         await state.clear()
-
-        # Darhol tasdiq xabari
         await m.answer(
-            f"✅ <b>Kanal muvaffaqiyatli qo'shildi!</b>\n\n"
+            f"✅ <b>Kanal/akkount muvaffaqiyatli qo'shildi!</b>\n\n"
             f"📛 Nomi: <b>{title}</b>\n"
             f"🔗 Link: <code>{link}</code>",
             parse_mode="HTML",
             disable_web_page_preview=True
         )
-
-        # Barcha foydalanuvchilarga yuborish (background task)
         asyncio.create_task(broadcast_subscription_to_all(m.from_user.id))
-
     except Exception as e:
         logger.error(f"sub_get_title xato: {e}")
         await state.clear()
         await m.answer(f"❌ Xatolik yuz berdi: {e}")
 
 async def broadcast_subscription_to_all(admin_id: int):
-    """Barcha foydalanuvchilarga majburiy obuna xabari yuboradi"""
     try:
         all_users = await get_all_users()
         sent = 0
@@ -912,8 +947,6 @@ async def broadcast_subscription_to_all(admin_id: int):
             except Exception as e:
                 failed += 1
                 logger.warning(f"Broadcast xato (user {u['user_id']}): {e}")
-
-        # Adminga natija yuborish
         await bot.send_message(
             admin_id,
             f"📢 *Obuna xabari yuborildi!*\n\n"
@@ -925,7 +958,6 @@ async def broadcast_subscription_to_all(admin_id: int):
     except Exception as e:
         logger.error(f"broadcast_subscription_to_all xato: {e}")
 
-# ===== KANALLAR RO'YXATIDAN O'CHIRISH =====
 @dp.callback_query(F.data == "sub_del_list")
 async def sub_del_list(c: CallbackQuery):
     if c.from_user.id != ADMIN_ID:
@@ -955,7 +987,6 @@ async def sub_del_confirm(c: CallbackQuery):
     await remove_required_channel(channel_id)
     ch_name = ch['title'] if ch else "Kanal"
     await c.answer(f"✅ '{ch_name}' o'chirildi!", show_alert=True)
-
     channels = await get_required_channels()
     kb = InlineKeyboardBuilder()
     if channels:
@@ -1256,7 +1287,9 @@ async def global_message_handler(m: Message, state: FSMContext):
     if user and user['is_banned']:
         return await m.answer("🚫 Siz botdan bloklangansiz.")
 
-# ================= ADMIN CHAT =================
+# =====================================================================
+# TUZATILGAN: ADMIN CHAT — to'liq qayta yozildi
+# =====================================================================
 @dp.callback_query(F.data == "adm_start_chat")
 async def admin_chat_init(c: CallbackQuery, state: FSMContext):
     if c.from_user.id != ADMIN_ID:
@@ -1270,33 +1303,96 @@ async def admin_ask_user(m: Message, state: FSMContext):
     if not m.text.isdigit():
         return await m.answer("⚠️ Faqat ID raqamini kiriting!")
     target_id = int(m.text)
-    await state.update_data(chat_with=target_id, is_user_side=False)
+
+    # Foydalanuvchi bazada bormi?
+    target_user = await get_user(target_id)
+    if not target_user:
+        await state.clear()
+        return await m.answer("❌ Bu ID da foydalanuvchi topilmadi!")
+
     kb = InlineKeyboardBuilder()
-    kb.button(text="✅ Ha, gaplashaman", callback_data=f"chat_yes_{m.from_user.id}")
-    kb.button(text="❌ Yo'q", callback_data=f"chat_no_{m.from_user.id}")
+    kb.button(text="✅ Ha, gaplashaman", callback_data=f"chat_yes_{ADMIN_ID}")
+    kb.button(text="❌ Yo'q", callback_data=f"chat_no_{ADMIN_ID}")
     kb.adjust(2)
+
     try:
-        await bot.send_message(target_id, "🔔 *Admin siz bilan bog'lanmoqchi!*\n\nSuhbatga rozimisiz?", reply_markup=kb.as_markup(), parse_mode="Markdown")
-        await m.answer(f"⏳ So'rov yuborildi (ID: {target_id}). Javob kuting...")
+        await bot.send_message(
+            target_id,
+            f"🔔 *Admin siz bilan bog'lanmoqchi!*\n\nSuhbatga rozimisiz?",
+            reply_markup=kb.as_markup(),
+            parse_mode="Markdown"
+        )
+        # Admin: so'rov yuborildi, chatga o'tish
+        await state.update_data(chat_with=target_id, is_user_side=False, chat_target_id=target_id)
         await state.set_state(BotState.in_active_chat)
-    except:
-        await m.answer("❌ Foydalanuvchi topilmadi yoki botni bloklagan!")
+        await m.answer(
+            f"⏳ So'rov yuborildi (ID: {target_id}).\n\n"
+            f"Foydalanuvchi rozilik bildirgach, xabar yubora olasiz.\n"
+            f"Suhbatni tugatish uchun /stop yoki quyidagi tugmani bosing:",
+            reply_markup=get_end_chat_kb()
+        )
+    except Exception as e:
+        await m.answer(f"❌ Foydalanuvchiga xabar yuborib bo'lmadi: {e}")
         await state.clear()
 
+# Foydalanuvchi "Ha" ni bosdi
 @dp.callback_query(F.data.startswith("chat_yes_"))
 async def chat_accept(c: CallbackQuery, state: FSMContext):
     admin_id = int(c.data.split("_")[2])
+
+    # Foydalanuvchini chatga o'tkazish
     await state.set_state(BotState.in_active_chat)
     await state.update_data(chat_with=admin_id, is_user_side=True)
-    await c.message.answer("✅ *Aloqa o'rnatildi!*\n\nXabaringizni yozing. Tugatish uchun /stop", parse_mode="Markdown", reply_markup=ReplyKeyboardRemove())
-    await bot.send_message(admin_id, f"✅ Foydalanuvchi ({c.from_user.id}) suhbatga kirdi!")
+
+    await c.message.edit_text(
+        "✅ *Aloqa o'rnatildi!*\n\nXabaringizni yozing. Tugatish uchun /stop",
+        parse_mode="Markdown"
+    )
+    await bot.send_message(
+        admin_id,
+        f"✅ *Foydalanuvchi ({c.from_user.id}) suhbatga kirdi!*\n\n"
+        f"Endi xabar yubora olasiz. Tugatish uchun /stop yoki tugmani bosing:",
+        parse_mode="Markdown",
+        reply_markup=get_end_chat_kb()
+    )
     await c.answer()
 
+# Foydalanuvchi "Yo'q" ni bosdi
 @dp.callback_query(F.data.startswith("chat_no_"))
 async def chat_reject(c: CallbackQuery):
     admin_id = int(c.data.split("_")[2])
-    await c.message.edit_text("❌ Suhbat rad etildi.")
-    await bot.send_message(admin_id, f"😔 Foydalanuvchi ({c.from_user.id}) suhbatlashishni istamadi.")
+    await c.message.edit_text("❌ Siz suhbatni rad etdingiz.")
+    try:
+        await bot.send_message(
+            admin_id,
+            f"😔 Foydalanuvchi ({c.from_user.id}) suhbatlashishni istamadi.",
+            reply_markup=get_admin_kb()
+        )
+    except:
+        pass
+    await c.answer()
+
+# Admin "Aloqani Tugatish" tugmasini bosdi
+@dp.callback_query(F.data == "end_chat")
+async def end_chat_callback(c: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    partner = data.get("chat_with")
+    is_user_side = data.get("is_user_side", False)
+    await state.clear()
+
+    await c.message.edit_text("🔴 *Aloqa tugadi.*", parse_mode="Markdown")
+    await bot.send_message(c.from_user.id, "📴 Suhbat yakunlandi.", reply_markup=get_main_kb(c.from_user.id))
+
+    if partner:
+        try:
+            if is_user_side:
+                # Foydalanuvchi tugatgan bo'lsa adminga xabar
+                await bot.send_message(partner, f"📴 Foydalanuvchi ({c.from_user.id}) suhbatni tugatdi.", reply_markup=get_admin_kb())
+            else:
+                # Admin tugatgan bo'lsa foydalanuvchiga xabar
+                await bot.send_message(partner, "📴 Admin suhbatni tugatdi. Aloqa uzildi.", reply_markup=get_main_kb(partner))
+        except:
+            pass
     await c.answer()
 
 # ================= BOTNI ISHGA TUSHIRISH =================
