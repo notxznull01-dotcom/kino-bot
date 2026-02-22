@@ -30,7 +30,7 @@ app = Flask('')
 
 @app.route('/')
 def home():
-    return "✅ Bot ishlayapti!"
+    return "✅ Kino Bot ishlayapti!"
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
@@ -41,7 +41,12 @@ def keep_alive():
     t.daemon = True
     t.start()
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s", handlers=[logging.StreamHandler(sys.stdout)])
+# ================= LOGGING =================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
 logger = logging.getLogger(__name__)
 
 bot = Bot(token=TOKEN)
@@ -54,48 +59,84 @@ async def init_db():
     global db_pool
     db_pool = await asyncpg.create_pool(DATABASE_URL)
     async with db_pool.acquire() as conn:
-        await conn.execute("""CREATE TABLE IF NOT EXISTS users (user_id BIGINT PRIMARY KEY, name TEXT NOT NULL, phone TEXT, coins INTEGER DEFAULT 100, referrer_id BIGINT DEFAULT NULL, joined_at DATE DEFAULT CURRENT_DATE, last_bonus DATE DEFAULT NULL, is_banned BOOLEAN DEFAULT FALSE)""")
-        await conn.execute("""CREATE TABLE IF NOT EXISTS movies (id SERIAL PRIMARY KEY, name TEXT NOT NULL, year TEXT, description TEXT, file_id TEXT, price INTEGER DEFAULT 0, added_at TIMESTAMP DEFAULT NOW())""")
-        await conn.execute("""CREATE TABLE IF NOT EXISTS purchases (id SERIAL PRIMARY KEY, user_id BIGINT, movie_id INTEGER, bought_at TIMESTAMP DEFAULT NOW())""")
-        await conn.execute("""CREATE TABLE IF NOT EXISTS required_channels (id SERIAL PRIMARY KEY, link TEXT NOT NULL, title TEXT DEFAULT 'Kanal', added_at TIMESTAMP DEFAULT NOW())""")
-        await conn.execute("""CREATE TABLE IF NOT EXISTS user_sub_status (user_id BIGINT, channel_id INTEGER, is_subscribed BOOLEAN DEFAULT FALSE, last_checked TIMESTAMP DEFAULT NOW(), subscribed_at TIMESTAMP, unsubscribed_at TIMESTAMP, PRIMARY KEY (user_id, channel_id))""")
-        await conn.execute("""CREATE TABLE IF NOT EXISTS sub_logs (id SERIAL PRIMARY KEY, user_id BIGINT, user_name TEXT, channel_id INTEGER, channel_title TEXT, channel_link TEXT, event TEXT, event_time TIMESTAMP DEFAULT NOW())""")
-        # ANIME JADVALLARI
         await conn.execute("""
-            CREATE TABLE IF NOT EXISTS anime (
-                id SERIAL PRIMARY KEY,
-                custom_id TEXT UNIQUE NOT NULL,
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
                 name TEXT NOT NULL,
-                status TEXT DEFAULT 'Davom etmoqda',
-                quality TEXT DEFAULT '720p, 1080p',
-                genres TEXT,
-                photo_id TEXT,
-                channel TEXT DEFAULT '@anireply',
-                voice TEXT DEFAULT 'AniBla',
+                phone TEXT,
+                coins INTEGER DEFAULT 100,
+                referrer_id BIGINT DEFAULT NULL,
+                joined_at DATE DEFAULT CURRENT_DATE,
+                last_bonus DATE DEFAULT NULL,
+                is_banned BOOLEAN DEFAULT FALSE
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS movies (
+                id SERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                year TEXT,
+                description TEXT,
+                file_id TEXT,
+                price INTEGER DEFAULT 0,
                 added_at TIMESTAMP DEFAULT NOW()
             )
         """)
         await conn.execute("""
-            CREATE TABLE IF NOT EXISTS anime_episodes (
+            CREATE TABLE IF NOT EXISTS purchases (
                 id SERIAL PRIMARY KEY,
-                anime_custom_id TEXT NOT NULL,
-                episode_num INTEGER NOT NULL,
-                file_id TEXT NOT NULL,
-                downloads INTEGER DEFAULT 0,
-                added_at TIMESTAMP DEFAULT NOW(),
-                UNIQUE(anime_custom_id, episode_num)
+                user_id BIGINT,
+                movie_id INTEGER,
+                bought_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS required_channels (
+                id SERIAL PRIMARY KEY,
+                link TEXT NOT NULL,
+                title TEXT DEFAULT 'Kanal',
+                added_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        # Har bir foydalanuvchi + kanal juftligi uchun holat
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_sub_status (
+                user_id BIGINT,
+                channel_id INTEGER,
+                is_subscribed BOOLEAN DEFAULT FALSE,
+                last_checked TIMESTAMP DEFAULT NOW(),
+                subscribed_at TIMESTAMP,
+                unsubscribed_at TIMESTAMP,
+                PRIMARY KEY (user_id, channel_id)
+            )
+        """)
+        # Barcha obuna hodisalari logi
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS sub_logs (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                user_name TEXT,
+                channel_id INTEGER,
+                channel_title TEXT,
+                channel_link TEXT,
+                event TEXT,
+                event_time TIMESTAMP DEFAULT NOW()
             )
         """)
     logger.info("✅ Baza tayyor!")
 
-# ================= MAVJUD DB FUNKSIYALAR =================
-async def get_user(user_id):
+# ================= BAZA FUNKSIYALAR =================
+async def get_user(user_id: int):
     async with db_pool.acquire() as conn:
         return await conn.fetchrow("SELECT * FROM users WHERE user_id=$1", user_id)
 
-async def create_user(user_id, name, phone=None, referrer_id=None):
+async def create_user(user_id: int, name: str, phone: str = None, referrer_id: int = None):
     async with db_pool.acquire() as conn:
-        await conn.execute("INSERT INTO users (user_id, name, phone, coins, referrer_id) VALUES ($1, $2, $3, 100, $4) ON CONFLICT (user_id) DO NOTHING", user_id, name, phone, referrer_id)
+        await conn.execute("""
+            INSERT INTO users (user_id, name, phone, coins, referrer_id)
+            VALUES ($1, $2, $3, 100, $4)
+            ON CONFLICT (user_id) DO NOTHING
+        """, user_id, name, phone, referrer_id)
         if referrer_id:
             await conn.execute("UPDATE users SET coins = coins + 50 WHERE user_id=$1", referrer_id)
 
@@ -103,7 +144,7 @@ async def get_all_users():
     async with db_pool.acquire() as conn:
         return await conn.fetch("SELECT user_id FROM users WHERE is_banned=FALSE")
 
-async def get_movie(movie_id):
+async def get_movie(movie_id: int):
     async with db_pool.acquire() as conn:
         return await conn.fetchrow("SELECT * FROM movies WHERE id=$1", movie_id)
 
@@ -113,15 +154,18 @@ async def get_all_movies():
 
 async def add_movie(name, year, description, file_id, price):
     async with db_pool.acquire() as conn:
-        row = await conn.fetchrow("INSERT INTO movies (name, year, description, file_id, price) VALUES ($1, $2, $3, $4, $5) RETURNING id", name, year, description, file_id, price)
+        row = await conn.fetchrow("""
+            INSERT INTO movies (name, year, description, file_id, price)
+            VALUES ($1, $2, $3, $4, $5) RETURNING id
+        """, name, year, description, file_id, price)
         return row['id']
 
-async def user_has_movie(user_id, movie_id):
+async def user_has_movie(user_id: int, movie_id: int):
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow("SELECT id FROM purchases WHERE user_id=$1 AND movie_id=$2", user_id, movie_id)
         return row is not None
 
-async def buy_movie(user_id, movie_id, price):
+async def buy_movie(user_id: int, movie_id: int, price: int):
     async with db_pool.acquire() as conn:
         user = await conn.fetchrow("SELECT coins FROM users WHERE user_id=$1", user_id)
         if not user or user['coins'] < price:
@@ -140,70 +184,25 @@ async def get_stats():
             "today_users": await conn.fetchval("SELECT COUNT(*) FROM users WHERE joined_at=CURRENT_DATE"),
         }
 
-# ================= ANIME DB FUNKSIYALAR (YANGI) =================
-async def anime_get_all():
-    async with db_pool.acquire() as conn:
-        return await conn.fetch("SELECT * FROM anime ORDER BY id DESC")
-
-async def anime_get_finished():
-    async with db_pool.acquire() as conn:
-        return await conn.fetch("SELECT * FROM anime WHERE status='Tugallangan' ORDER BY id DESC")
-
-async def anime_get_by_id(custom_id):
-    async with db_pool.acquire() as conn:
-        return await conn.fetchrow("SELECT * FROM anime WHERE custom_id=$1", custom_id)
-
-async def anime_add(custom_id, name, status, quality, genres, photo_id, channel, voice):
-    async with db_pool.acquire() as conn:
-        await conn.execute("INSERT INTO anime (custom_id, name, status, quality, genres, photo_id, channel, voice) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (custom_id) DO NOTHING", custom_id, name, status, quality, genres, photo_id, channel, voice)
-
-async def anime_mark_finished(custom_id):
-    async with db_pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT id FROM anime WHERE custom_id=$1", custom_id)
-        if not row:
-            return False
-        await conn.execute("UPDATE anime SET status='Tugallangan' WHERE custom_id=$1", custom_id)
-        return True
-
-async def anime_delete(custom_id):
-    async with db_pool.acquire() as conn:
-        await conn.execute("DELETE FROM anime_episodes WHERE anime_custom_id=$1", custom_id)
-        await conn.execute("DELETE FROM anime WHERE custom_id=$1", custom_id)
-
-async def episode_add(anime_custom_id, episode_num, file_id):
-    async with db_pool.acquire() as conn:
-        await conn.execute("INSERT INTO anime_episodes (anime_custom_id, episode_num, file_id) VALUES ($1, $2, $3) ON CONFLICT (anime_custom_id, episode_num) DO UPDATE SET file_id=$3", anime_custom_id, episode_num, file_id)
-
-async def episode_get_all(anime_custom_id):
-    async with db_pool.acquire() as conn:
-        return await conn.fetch("SELECT * FROM anime_episodes WHERE anime_custom_id=$1 ORDER BY episode_num", anime_custom_id)
-
-async def episode_get(anime_custom_id, episode_num):
-    async with db_pool.acquire() as conn:
-        return await conn.fetchrow("SELECT * FROM anime_episodes WHERE anime_custom_id=$1 AND episode_num=$2", anime_custom_id, episode_num)
-
-async def episode_increment_download(anime_custom_id, episode_num):
-    async with db_pool.acquire() as conn:
-        await conn.execute("UPDATE anime_episodes SET downloads = downloads + 1 WHERE anime_custom_id=$1 AND episode_num=$2", anime_custom_id, episode_num)
-
 # ================= MAJBURIY OBUNA =================
 async def get_required_channels():
     async with db_pool.acquire() as conn:
         return await conn.fetch("SELECT * FROM required_channels ORDER BY id")
 
-async def add_required_channel(link, title="Kanal"):
+async def add_required_channel(link: str, title: str = "Kanal"):
     async with db_pool.acquire() as conn:
         await conn.execute("INSERT INTO required_channels (link, title) VALUES ($1, $2)", link, title)
 
-async def remove_required_channel(channel_id):
+async def remove_required_channel(channel_id: int):
     async with db_pool.acquire() as conn:
         await conn.execute("DELETE FROM required_channels WHERE id=$1", channel_id)
         await conn.execute("DELETE FROM user_sub_status WHERE channel_id=$1", channel_id)
 
-def is_telegram_link(link):
+def is_telegram_link(link: str) -> bool:
     return 't.me/' in link or 'telegram.me/' in link
 
-def extract_tg_username(link):
+def extract_tg_username(link: str):
+    """Link dan @username chiqaradi. Invite link bo'lsa None qaytaradi."""
     try:
         if 't.me/' in link:
             uname = link.split('t.me/')[-1].strip().strip('/')
@@ -217,70 +216,165 @@ def extract_tg_username(link):
     except:
         return None
 
-async def check_tg_sub_api(user_id, link):
+# ===================================================================
+# ASOSIY TEKSHIRISH: Telegram API orqali REAL VAQTDA foydalanuvchi ID
+# Hech qanday kesh yo'q — har safar to'g'ridan-to'g'ri API ga so'rov
+# ===================================================================
+async def check_tg_sub_api(user_id: int, link: str) -> bool:
+    """
+    Telegram get_chat_member API orqali foydalanuvchi ID sini tekshiradi.
+    True  = obuna bo'lgan (member, administrator, creator)
+    False = obuna bo'lmagan (left, kicked, banned) yoki xato
+    """
     username = extract_tg_username(link)
     if not username:
+        logger.warning(f"Invite link yoki noto'g'ri format: {link}")
         return False
     try:
         member = await bot.get_chat_member(username, user_id)
-        return member.status not in ('left', 'kicked', 'banned')
+        result = member.status not in ('left', 'kicked', 'banned')
+        logger.info(f"check_tg_sub_api: user={user_id} channel={username} status={member.status} result={result}")
+        return result
     except Exception as e:
         logger.warning(f"get_chat_member xato ({username}, {user_id}): {e}")
         return False
 
-async def get_external_confirmed(user_id, channel_id):
+async def get_external_confirmed(user_id: int, channel_id: int) -> bool:
+    """Tashqi kanal (Instagram va h.k.) uchun DB dagi tasdiqlash holatini qaytaradi."""
     async with db_pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT is_subscribed FROM user_sub_status WHERE user_id=$1 AND channel_id=$2", user_id, channel_id)
+        row = await conn.fetchrow(
+            "SELECT is_subscribed FROM user_sub_status WHERE user_id=$1 AND channel_id=$2",
+            user_id, channel_id
+        )
         return bool(row and row['is_subscribed'])
 
-async def set_external_confirmed(user_id, channel_id):
+async def set_external_confirmed(user_id: int, channel_id: int):
+    """Tashqi kanal uchun tasdiqlashni DB ga yozadi."""
     now = datetime.now()
     async with db_pool.acquire() as conn:
-        await conn.execute("INSERT INTO user_sub_status (user_id, channel_id, is_subscribed, last_checked, subscribed_at) VALUES ($1, $2, TRUE, $3, $3) ON CONFLICT (user_id, channel_id) DO UPDATE SET is_subscribed = TRUE, last_checked = $3, subscribed_at = COALESCE(user_sub_status.subscribed_at, $3)", user_id, channel_id, now)
+        await conn.execute("""
+            INSERT INTO user_sub_status (user_id, channel_id, is_subscribed, last_checked, subscribed_at)
+            VALUES ($1, $2, TRUE, $3, $3)
+            ON CONFLICT (user_id, channel_id) DO UPDATE
+            SET is_subscribed = TRUE, last_checked = $3,
+                subscribed_at = COALESCE(user_sub_status.subscribed_at, $3)
+        """, user_id, channel_id, now)
 
-async def track_and_log(user_id, user_name, channel, is_sub):
+# ===================================================================
+# HOLAT KUZATISH VA LOGLASH
+# Oldingi holat bilan solishtiradi, o'zgarsa — log yozadi va admin xabardor qiladi
+# ===================================================================
+async def track_and_log(user_id: int, user_name: str, channel: dict, is_sub: bool):
+    """Obuna holatini DB ga yozadi, o'zgarish bo'lsa log qiladi."""
     ch_id = channel['id']
     ch_title = channel['title']
     ch_link = channel['link']
     now = datetime.now()
+
     async with db_pool.acquire() as conn:
-        prev = await conn.fetchrow("SELECT is_subscribed FROM user_sub_status WHERE user_id=$1 AND channel_id=$2", user_id, ch_id)
+        # Oldingi holatni olamiz
+        prev = await conn.fetchrow(
+            "SELECT is_subscribed FROM user_sub_status WHERE user_id=$1 AND channel_id=$2",
+            user_id, ch_id
+        )
         prev_status = prev['is_subscribed'] if prev else None
+
+        # Yangi holatni yozamiz
         if is_sub:
-            await conn.execute("INSERT INTO user_sub_status (user_id, channel_id, is_subscribed, last_checked, subscribed_at) VALUES ($1, $2, TRUE, $3, $3) ON CONFLICT (user_id, channel_id) DO UPDATE SET is_subscribed = TRUE, last_checked = $3, subscribed_at = CASE WHEN user_sub_status.is_subscribed = FALSE OR user_sub_status.subscribed_at IS NULL THEN $3 ELSE user_sub_status.subscribed_at END", user_id, ch_id, now)
+            await conn.execute("""
+                INSERT INTO user_sub_status (user_id, channel_id, is_subscribed, last_checked, subscribed_at)
+                VALUES ($1, $2, TRUE, $3, $3)
+                ON CONFLICT (user_id, channel_id) DO UPDATE
+                SET is_subscribed = TRUE, last_checked = $3,
+                    subscribed_at = CASE WHEN user_sub_status.is_subscribed = FALSE OR user_sub_status.subscribed_at IS NULL
+                                         THEN $3 ELSE user_sub_status.subscribed_at END
+            """, user_id, ch_id, now)
         else:
-            await conn.execute("INSERT INTO user_sub_status (user_id, channel_id, is_subscribed, last_checked, unsubscribed_at) VALUES ($1, $2, FALSE, $3, $3) ON CONFLICT (user_id, channel_id) DO UPDATE SET is_subscribed = FALSE, last_checked = $3, unsubscribed_at = CASE WHEN user_sub_status.is_subscribed = TRUE THEN $3 ELSE user_sub_status.unsubscribed_at END", user_id, ch_id, now)
+            await conn.execute("""
+                INSERT INTO user_sub_status (user_id, channel_id, is_subscribed, last_checked, unsubscribed_at)
+                VALUES ($1, $2, FALSE, $3, $3)
+                ON CONFLICT (user_id, channel_id) DO UPDATE
+                SET is_subscribed = FALSE, last_checked = $3,
+                    unsubscribed_at = CASE WHEN user_sub_status.is_subscribed = TRUE
+                                           THEN $3 ELSE user_sub_status.unsubscribed_at END
+            """, user_id, ch_id, now)
+
+        # Hodisani aniqlash (faqat o'zgarishda yoki birinchi marta)
         event = None
-        if prev_status is None and is_sub: event = 'first_subscribed'
-        elif prev_status is None and not is_sub: event = 'checked_not_subscribed'
-        elif prev_status is False and is_sub: event = 'subscribed'
-        elif prev_status is True and not is_sub: event = 'unsubscribed'
+        if prev_status is None and is_sub:
+            event = 'first_subscribed'
+        elif prev_status is None and not is_sub:
+            event = 'checked_not_subscribed'
+        elif prev_status is False and is_sub:
+            event = 'subscribed'
+        elif prev_status is True and not is_sub:
+            event = 'unsubscribed'  # Obunani olib tashladi!
+
         if event:
-            await conn.execute("INSERT INTO sub_logs (user_id, user_name, channel_id, channel_title, channel_link, event) VALUES ($1, $2, $3, $4, $5, $6)", user_id, user_name, ch_id, ch_title, ch_link, event)
+            await conn.execute("""
+                INSERT INTO sub_logs (user_id, user_name, channel_id, channel_title, channel_link, event)
+                VALUES ($1, $2, $3, $4, $5, $6)
+            """, user_id, user_name, ch_id, ch_title, ch_link, event)
+            # Adminga xabar
             asyncio.create_task(notify_admin_sub(user_id, user_name, ch_title, ch_link, event))
 
-async def notify_admin_sub(user_id, user_name, ch_title, ch_link, event):
-    emoji = {'first_subscribed': '🆕✅', 'subscribed': '✅', 'checked_not_subscribed': '❌', 'unsubscribed': '⚠️🔴'}.get(event, '❓')
-    label = {'first_subscribed': "birinchi marta obuna bo'ldi", 'subscribed': "qayta obuna bo'ldi", 'checked_not_subscribed': "tekshirdi, obuna emas", 'unsubscribed': "OBUNANI OLIB TASHLADI!"}.get(event, event)
+async def notify_admin_sub(user_id: int, user_name: str, ch_title: str, ch_link: str, event: str):
+    """Admin ga obuna o'zgarishi haqida xabar yuboradi."""
+    emoji = {
+        'first_subscribed': '🆕✅',
+        'subscribed': '✅',
+        'checked_not_subscribed': '❌',
+        'unsubscribed': '⚠️🔴',
+    }.get(event, '❓')
+    label = {
+        'first_subscribed': "birinchi marta obuna bo'ldi",
+        'subscribed': "qayta obuna bo'ldi",
+        'checked_not_subscribed': "tekshirdi, obuna emas",
+        'unsubscribed': "OBUNANI OLIB TASHLADI!",
+    }.get(event, event)
     t = datetime.now().strftime("%d.%m.%Y %H:%M")
     try:
-        await bot.send_message(ADMIN_ID, f"{emoji} <b>Obuna hodisasi</b> | {t}\n👤 <b>{user_name}</b> (<code>{user_id}</code>)\n📌 <a href='{ch_link}'>{ch_title}</a>\n📋 <b>{label}</b>", parse_mode="HTML", disable_web_page_preview=True)
-    except: pass
+        await bot.send_message(
+            ADMIN_ID,
+            f"{emoji} <b>Obuna hodisasi</b> | {t}\n"
+            f"👤 <b>{user_name}</b> (<code>{user_id}</code>)\n"
+            f"📌 <a href='{ch_link}'>{ch_title}</a>\n"
+            f"📋 <b>{label}</b>",
+            parse_mode="HTML",
+            disable_web_page_preview=True
+        )
+    except:
+        pass
 
-async def check_all_subs(user_id, user_name):
+# ===================================================================
+# BARCHA KANALLARGA TEKSHIRISH — har bir funksiyada chaqiriladi
+# ===================================================================
+async def check_all_subs(user_id: int, user_name: str) -> list:
+    """
+    Barcha majburiy kanallarga obunani REAL VAQTDA tekshiradi.
+    Telegram: API orqali, Tashqi: DB dan.
+    Qaytaradi: obuna bo'lmagan kanallar ro'yxati.
+    """
     channels = await get_required_channels()
-    if not channels: return []
+    if not channels:
+        return []
+
     not_subscribed = []
     for ch in channels:
         if is_telegram_link(ch['link']):
             is_sub = await check_tg_sub_api(user_id, ch['link'])
         else:
             is_sub = await get_external_confirmed(user_id, ch['id'])
+
+        # DB ga yozamiz va loglaymiz
         await track_and_log(user_id, user_name, ch, is_sub)
-        if not is_sub: not_subscribed.append(ch)
+
+        if not is_sub:
+            not_subscribed.append(ch)
+
     return not_subscribed
 
-def build_sub_kb(channels):
+def build_sub_kb(channels: list) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
     for i, ch in enumerate(channels):
@@ -289,18 +383,34 @@ def build_sub_kb(channels):
     kb.adjust(1)
     return kb.as_markup()
 
-async def send_sub_msg(user_id, channels):
+async def send_sub_msg(user_id: int, channels: list):
     lines = "".join(f"{i}. <a href='{ch['link']}'>{ch['title']}</a>\n" for i, ch in enumerate(channels, 1))
-    text = f"⚠️ <b>Botdan foydalanish uchun\nquyidagi kanallarga a'zo bo'ling:</b>\n\n{lines}\nA'zo bo'lgach ✅ <b>Obunani Tekshirish</b> tugmasini bosing."
+    text = (
+        "⚠️ <b>Botdan foydalanish uchun\n"
+        "quyidagi kanallarga a'zo bo'ling:</b>\n\n"
+        f"{lines}\n"
+        "A'zo bo'lgach ✅ <b>Obunani Tekshirish</b> tugmasini bosing."
+    )
     try:
-        await bot.send_message(user_id, text, reply_markup=build_sub_kb(channels), parse_mode="HTML", disable_web_page_preview=True)
+        await bot.send_message(
+            user_id, text,
+            reply_markup=build_sub_kb(channels),
+            parse_mode="HTML",
+            disable_web_page_preview=True
+        )
     except Exception as e:
         logger.warning(f"send_sub_msg xato: {e}")
 
-async def sub_guard(m):
+async def sub_guard(m: Message) -> bool:
+    """
+    Har bir bot funksiyasining boshida chaqiriladi.
+    True = davom etish | False = obuna talab qilindi.
+    """
     user = await get_user(m.from_user.id)
-    if not user: return True
-    if user['is_banned']: return True
+    if not user:
+        return True
+    if user['is_banned']:
+        return True
     not_sub = await check_all_subs(m.from_user.id, user['name'])
     if not_sub:
         await send_sub_msg(m.from_user.id, not_sub)
@@ -329,23 +439,9 @@ class BotState(StatesGroup):
     remove_coin_amount = State()
     adding_sub_link = State()
     adding_sub_title = State()
-    # === YANGI ANIME ===
-    anime_add_name = State()
-    anime_add_status = State()
-    anime_add_quality = State()
-    anime_add_genres = State()
-    anime_add_custom_id = State()
-    anime_add_channel = State()
-    anime_add_voice = State()
-    anime_add_photo = State()
-    anime_ep_select = State()
-    anime_ep_num = State()
-    anime_ep_video = State()
-    anime_finish_code = State()
-    anime_delete_code = State()
 
 # ================= KLAVIATURALAR =================
-def get_main_kb(uid):
+def get_main_kb(uid: int):
     builder = ReplyKeyboardBuilder()
     builder.button(text="🎬 Kinolar Ro'yxati")
     builder.button(text="🎟 Kino Sotib Olish")
@@ -353,8 +449,6 @@ def get_main_kb(uid):
     builder.button(text="🎁 Kunlik Bonus")
     builder.button(text="👥 Do'st Taklif Qilish")
     builder.button(text="✍️ Adminga Yozish")
-    builder.button(text="🌸 Tugallangan Animalar")
-    builder.button(text="📋 Barcha Animalar")
     if uid == ADMIN_ID:
         builder.button(text="👑 Admin Panel")
         builder.button(text="📊 Statistika")
@@ -368,19 +462,13 @@ def get_admin_kb():
     builder.button(text="💰 Coin Qo'shish", callback_data="adm_add_coin")
     builder.button(text="💸 Coin Olish", callback_data="adm_remove_coin")
     builder.button(text="📢 Reklama Yuborish", callback_data="adm_broadcast")
-    builder.button(text="🚫 Bloklash", callback_data="adm_ban")
+    builder.button(text="🚫 Foydalanuvchi Bloklash", callback_data="adm_ban")
     builder.button(text="✅ Blokdan Chiqarish", callback_data="adm_unban")
     builder.button(text="💬 Foydalanuvchi bilan Gaplash", callback_data="adm_start_chat")
     builder.button(text="📊 To'liq Statistika", callback_data="adm_full_stats")
     builder.button(text="🔔 Majburiy Obuna", callback_data="adm_subscription")
-    builder.button(text="👥 Foydalanuvchilar", callback_data="adm_users")
+    builder.button(text="👥 Foydalanuvchilar Ro'yxati", callback_data="adm_users")
     builder.button(text="📋 Obuna Loglari", callback_data="adm_sub_logs")
-    # === ANIME ===
-    builder.button(text="🌸 Anime Qo'shish", callback_data="adm_anime_add")
-    builder.button(text="📺 Qism Qo'shish", callback_data="adm_anime_ep")
-    builder.button(text="✅ Tugallandi Belgilash", callback_data="adm_anime_finish")
-    builder.button(text="🗑 Anime O'chirish", callback_data="adm_anime_delete")
-    builder.button(text="📋 Animalar Ro'yxati", callback_data="adm_anime_list")
     builder.button(text="❌ Yopish", callback_data="adm_close")
     builder.adjust(2)
     return builder.as_markup()
@@ -390,60 +478,21 @@ def get_admin_end_chat_kb():
     builder.button(text="🔴 Aloqani Tugatish", callback_data="end_chat")
     return builder.as_markup()
 
-# ================= ANIME CAPTION (RASMDAGIDAY) =================
-def anime_info_caption(anime, ep_count=0):
-    return (
-        f"🎬 *Anime: {anime['name']}*\n\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"↪ Holati: {anime['status']}\n"
-        f"↪ Sifat - {anime['quality']}\n"
-        f"↪ Janrlari: {anime['genres']}\n"
-        f"↪ Kanal: {anime['channel']}\n"
-        f"↪ Ovoz: {anime['voice']}\n"
-        f"━━━━━━━━━━━━━━━━━━\n\n"
-        f"📦 *Botimiz:* @anireplybot\n"
-        f"🆔 *Anime ID:* {anime['custom_id']}\n"
-        f"🔗 *Link:* t.me/anireplybot?start={anime['custom_id']}\n\n"
-        f"📺 *Qismni tanlang* ({ep_count} ta):"
-    )
-
-def build_episode_buttons(custom_id, episodes):
-    """Rasmdagiday 5 tadan qatorli tugmalar"""
-    kb = InlineKeyboardBuilder()
-    for ep in episodes:
-        kb.button(text=str(ep['episode_num']), callback_data=f"aep_{custom_id}_{ep['episode_num']}")
-    kb.adjust(5)
-    return kb.as_markup()
-
-# ================= /START =================
+# ================= START =================
 @dp.message(CommandStart())
 async def start_cmd(m: Message, state: FSMContext):
     await state.clear()
-    args = m.text.split()
-
-    # /start <anime_id> — to'g'ridan anime ochish (havoladan kelganda)
-    if len(args) > 1 and not args[1].startswith("ref"):
-        anime_id = args[1]
-        anime = await anime_get_by_id(anime_id)
-        if anime:
-            user = await get_user(m.from_user.id)
-            if user:
-                episodes = await episode_get_all(anime_id)
-                caption = anime_info_caption(anime, len(episodes))
-                kb = build_episode_buttons(anime_id, episodes) if episodes else None
-                if anime['photo_id']:
-                    await m.answer_photo(photo=anime['photo_id'], caption=caption, parse_mode="Markdown", reply_markup=kb)
-                else:
-                    await m.answer(caption, parse_mode="Markdown", reply_markup=kb)
-                return
-
     user = await get_user(m.from_user.id)
+
     referrer_id = None
+    args = m.text.split()
     if len(args) > 1 and args[1].startswith("ref"):
         try:
             referrer_id = int(args[1][3:])
-            if referrer_id == m.from_user.id: referrer_id = None
-        except: pass
+            if referrer_id == m.from_user.id:
+                referrer_id = None
+        except:
+            pass
 
     if user:
         if user['is_banned']:
@@ -451,46 +500,87 @@ async def start_cmd(m: Message, state: FSMContext):
         not_sub = await check_all_subs(m.from_user.id, user['name'])
         if not_sub:
             return await send_sub_msg(m.from_user.id, not_sub)
-        return await m.answer(f"🌟 *Xush kelibsiz qaytib, {user['name']}!*\n\n💰 Balansingiz: *{user['coins']} coin*", reply_markup=get_main_kb(m.from_user.id), parse_mode="Markdown")
+        return await m.answer(
+            f"🌟 *Xush kelibsiz qaytib, {user['name']}!*\n\n💰 Balansingiz: *{user['coins']} coin*",
+            reply_markup=get_main_kb(m.from_user.id), parse_mode="Markdown"
+        )
     else:
         await state.update_data(referrer_id=referrer_id)
-        await m.answer("👋 *Assalomu alaykum! Botga xush kelibsiz!*\n\nRo'yxatdan o'tish uchun *ismingizni* kiriting:", parse_mode="Markdown")
+        await m.answer(
+            "👋 *Assalomu alaykum! Kino Botga xush kelibsiz!*\n\nRo'yxatdan o'tish uchun *ismingizni* kiriting:",
+            parse_mode="Markdown"
+        )
         await state.set_state(BotState.waiting_name)
 
-# ================= OBUNA TEKSHIRISH =================
+# ===================================================================
+# "TEKSHIRISH" TUGMASI
+# Telegram: API orqali, Tashqi: "Tekshirish" bosilganda tasdiqlanadi
+# ===================================================================
 @dp.callback_query(F.data == "check_subscription")
 async def check_sub_callback(c: CallbackQuery):
     await c.answer("⏳ Tekshirilmoqda...", show_alert=False)
+
     user = await get_user(c.from_user.id)
-    if not user: return await c.message.answer("❌ Avval ro'yxatdan o'ting! /start")
-    if user['is_banned']: return await c.message.answer("🚫 Siz botdan bloklangansiz.")
+    if not user:
+        return await c.message.answer("❌ Avval ro'yxatdan o'ting! /start")
+    if user['is_banned']:
+        return await c.message.answer("🚫 Siz botdan bloklangansiz.")
+
     channels = await get_required_channels()
     not_subscribed = []
+
     for ch in channels:
         if is_telegram_link(ch['link']):
+            # Telegram: API orqali haqiqiy tekshirish
             is_sub = await check_tg_sub_api(c.from_user.id, ch['link'])
         else:
+            # Tashqi kanal: foydalanuvchi "Tekshirish" tugmasini bosdi = tasdiqlandi
             is_sub = True
             await set_external_confirmed(c.from_user.id, ch['id'])
+
         await track_and_log(c.from_user.id, user['name'], ch, is_sub)
-        if not is_sub: not_subscribed.append(ch)
+
+        if not is_sub:
+            not_subscribed.append(ch)
+
     if not not_subscribed:
         try:
-            await c.message.edit_text("✅ <b>Barcha kanallarga a'zo bo'ldingiz!</b>", parse_mode="HTML")
-        except: pass
-        await bot.send_message(c.from_user.id, f"🎉 <b>Xush kelibsiz, {user['name']}!</b>\n\n💰 Balansingiz: <b>{user['coins']} coin</b>", reply_markup=get_main_kb(c.from_user.id), parse_mode="HTML")
+            await c.message.edit_text(
+                "✅ <b>Barcha kanallarga a'zo bo'ldingiz!</b>\n\nEndi botdan to'liq foydalaning!",
+                parse_mode="HTML"
+            )
+        except:
+            pass
+        await bot.send_message(
+            c.from_user.id,
+            f"🎉 <b>Xush kelibsiz, {user['name']}!</b>\n\n💰 Balansingiz: <b>{user['coins']} coin</b>",
+            reply_markup=get_main_kb(c.from_user.id),
+            parse_mode="HTML"
+        )
     else:
         lines = "".join(f"{i}. <a href='{ch['link']}'>{ch['title']}</a>\n" for i, ch in enumerate(not_subscribed, 1))
-        text = f"❌ <b>Hali {len(not_subscribed)} ta kanalga a'zo bo'lmadingiz:</b>\n\n{lines}\nA'zo bo'lib, ✅ <b>Obunani Tekshirish</b> tugmasini bosing."
+        text = (
+            f"❌ <b>Hali {len(not_subscribed)} ta kanalga a'zo bo'lmadingiz:</b>\n\n"
+            f"{lines}\n"
+            "A'zo bo'lib, <b>✅ Obunani Tekshirish</b> tugmasini qayta bosing."
+        )
         try:
-            await c.message.edit_text(text, reply_markup=build_sub_kb(not_subscribed), parse_mode="HTML", disable_web_page_preview=True)
+            await c.message.edit_text(
+                text, reply_markup=build_sub_kb(not_subscribed),
+                parse_mode="HTML", disable_web_page_preview=True
+            )
         except:
-            await bot.send_message(c.from_user.id, text, reply_markup=build_sub_kb(not_subscribed), parse_mode="HTML", disable_web_page_preview=True)
+            await bot.send_message(
+                c.from_user.id, text,
+                reply_markup=build_sub_kb(not_subscribed),
+                parse_mode="HTML", disable_web_page_preview=True
+            )
 
 # ================= RO'YXATDAN O'TISH =================
 @dp.message(BotState.waiting_name)
 async def reg_name(m: Message, state: FSMContext):
-    if len(m.text) < 2: return await m.answer("⚠️ Ism kamida 2 ta harf bo'lishi kerak!")
+    if len(m.text) < 2:
+        return await m.answer("⚠️ Ism kamida 2 ta harf bo'lishi kerak!")
     await state.update_data(name=m.text.strip())
     kb = ReplyKeyboardBuilder()
     kb.button(text="📱 Raqamni Yuborish", request_contact=True)
@@ -499,17 +589,25 @@ async def reg_name(m: Message, state: FSMContext):
     await m.answer("📱 Telefon raqamingizni yuboring:", reply_markup=kb.as_markup(resize_keyboard=True))
     await state.set_state(BotState.waiting_phone)
 
-async def finish_registration(m, state, name, phone=None):
+async def finish_registration(m: Message, state: FSMContext, name: str, phone: str = None):
     data = await state.get_data()
     await create_user(m.from_user.id, name, phone, data.get('referrer_id'))
     await state.clear()
     channels = await get_required_channels()
     if channels:
-        await m.answer(f"✅ *Tabriklaymiz, {name}!*\n\n🎉 Ro'yxatdan o'tdingiz!\n💰 Sizga *100 coin* sovg'a qilindi!\n\n⚠️ Botdan foydalanish uchun kanallarga obuna bo'ling:", parse_mode="Markdown", reply_markup=ReplyKeyboardRemove())
+        await m.answer(
+            f"✅ *Tabriklaymiz, {name}!*\n\n🎉 Ro'yxatdan o'tdingiz!\n💰 Sizga *100 coin* sovg'a qilindi!\n\n"
+            "⚠️ Botdan foydalanish uchun kanallarga obuna bo'ling:",
+            parse_mode="Markdown", reply_markup=ReplyKeyboardRemove()
+        )
         not_sub = await check_all_subs(m.from_user.id, name)
-        if not_sub: await send_sub_msg(m.from_user.id, not_sub)
+        if not_sub:
+            await send_sub_msg(m.from_user.id, not_sub)
     else:
-        await m.answer(f"✅ *Tabriklaymiz, {name}!*\n\n🎉 Ro'yxatdan o'tdingiz!\n💰 Sizga *100 coin* sovg'a qilindi!", reply_markup=get_main_kb(m.from_user.id), parse_mode="Markdown")
+        await m.answer(
+            f"✅ *Tabriklaymiz, {name}!*\n\n🎉 Ro'yxatdan o'tdingiz!\n💰 Sizga *100 coin* sovg'a qilindi!",
+            reply_markup=get_main_kb(m.from_user.id), parse_mode="Markdown"
+        )
 
 @dp.message(BotState.waiting_phone, F.contact)
 async def reg_phone_contact(m: Message, state: FSMContext):
@@ -524,9 +622,11 @@ async def reg_skip_phone(m: Message, state: FSMContext):
 # ================= KINOLAR =================
 @dp.message(F.text == "🎬 Kinolar Ro'yxati")
 async def show_movies(m: Message):
-    if not await sub_guard(m): return
+    if not await sub_guard(m):
+        return
     movies = await get_all_movies()
-    if not movies: return await m.answer("📽 Hozircha bazada kinolar mavjud emas.")
+    if not movies:
+        return await m.answer("📽 Hozircha bazada kinolar mavjud emas.")
     text = "🔥 *KINOLAR RO'YXATI* 🔥\n━━━━━━━━━━━━━━━━━━━━\n\n"
     for movie in movies:
         text += f"🎬 *{movie['name']}*\n📅 Yil: {movie['year']}\n💎 Narx: *{movie['price']} coin*\n🆔 Kod: `{movie['id']}`\n────────────────────\n"
@@ -535,17 +635,21 @@ async def show_movies(m: Message):
 
 @dp.message(F.text == "🎟 Kino Sotib Olish")
 async def buy_movie_start(m: Message, state: FSMContext):
-    if not await sub_guard(m): return
+    if not await sub_guard(m):
+        return
     user = await get_user(m.from_user.id)
-    if not user: return await m.answer("❌ Avval ro'yxatdan o'ting! /start")
+    if not user:
+        return await m.answer("❌ Avval ro'yxatdan o'ting! /start")
     await m.answer(f"💰 Balansingiz: *{user['coins']} coin*\n\n🎬 Kino *kodini* yuboring:", parse_mode="Markdown")
     await state.set_state(BotState.buying_movie)
 
 @dp.message(BotState.buying_movie)
 async def process_buy(m: Message, state: FSMContext):
-    if not m.text.isdigit(): return await m.answer("⚠️ Faqat kino kodini raqamda yozing!")
+    if not m.text.isdigit():
+        return await m.answer("⚠️ Faqat kino kodini raqamda yozing!")
     movie = await get_movie(int(m.text))
-    if not movie: return await m.answer("❌ Bunday kodli kino topilmadi!")
+    if not movie:
+        return await m.answer("❌ Bunday kodli kino topilmadi!")
     user = await get_user(m.from_user.id)
     if await user_has_movie(m.from_user.id, movie['id']):
         await state.clear()
@@ -560,12 +664,19 @@ async def process_buy(m: Message, state: FSMContext):
         return
     if user['coins'] < movie['price']:
         await state.clear()
-        return await m.answer(f"❌ *Coinlar yetarli emas!*\n\n💎 Narx: {movie['price']} coin\n💰 Sizda: {user['coins']} coin", parse_mode="Markdown")
+        return await m.answer(
+            f"❌ *Coinlar yetarli emas!*\n\n💎 Narx: {movie['price']} coin\n💰 Sizda: {user['coins']} coin",
+            parse_mode="Markdown"
+        )
     kb = InlineKeyboardBuilder()
     kb.button(text=f"✅ Ha, {movie['price']} coin to'layman", callback_data=f"confirm_buy_{movie['id']}")
     kb.button(text="❌ Bekor qilish", callback_data="cancel_buy")
     kb.adjust(1)
-    await m.answer(f"🎬 *{movie['name']}* ({movie['year']})\n\n📝 {movie['description'] or 'Tavsif mavjud emas'}\n\n💎 Narx: *{movie['price']} coin*\n💰 Sizda: *{user['coins']} coin*\n\nTasdiqlaysizmi?", reply_markup=kb.as_markup(), parse_mode="Markdown")
+    await m.answer(
+        f"🎬 *{movie['name']}* ({movie['year']})\n\n📝 {movie['description'] or 'Tavsif mavjud emas'}\n\n"
+        f"💎 Narx: *{movie['price']} coin*\n💰 Sizda: *{user['coins']} coin*\n\nTasdiqlaysizmi?",
+        reply_markup=kb.as_markup(), parse_mode="Markdown"
+    )
     await state.clear()
 
 @dp.callback_query(F.data.startswith("confirm_buy_"))
@@ -596,20 +707,31 @@ async def cancel_purchase(c: CallbackQuery):
 # ================= HISOBIM =================
 @dp.message(F.text == "💰 Hisobim")
 async def my_account(m: Message):
-    if not await sub_guard(m): return
+    if not await sub_guard(m):
+        return
     user = await get_user(m.from_user.id)
-    if not user: return await m.answer("❌ Avval ro'yxatdan o'ting! /start")
+    if not user:
+        return await m.answer("❌ Avval ro'yxatdan o'ting! /start")
     async with db_pool.acquire() as conn:
         purchases_count = await conn.fetchval("SELECT COUNT(*) FROM purchases WHERE user_id=$1", m.from_user.id)
         referrals_count = await conn.fetchval("SELECT COUNT(*) FROM users WHERE referrer_id=$1", m.from_user.id)
-    await m.answer(f"👤 *Shaxsiy Kabinet*\n━━━━━━━━━━━━━━━━━━\n\n📛 Ism: *{user['name']}*\n📱 Tel: {user['phone'] or 'Kiritilmagan'}\n💰 Balans: *{user['coins']} coin*\n🎬 Sotib olingan: *{purchases_count}* ta\n👥 Taklif qilingan: *{referrals_count}* ta\n📅 Sana: *{user['joined_at']}*\n\n🔑 ID: `{m.from_user.id}`", parse_mode="Markdown")
+    await m.answer(
+        f"👤 *Shaxsiy Kabinet*\n━━━━━━━━━━━━━━━━━━\n\n"
+        f"📛 Ism: *{user['name']}*\n📱 Tel: {user['phone'] or 'Kiritilmagan'}\n"
+        f"💰 Balans: *{user['coins']} coin*\n🎬 Sotib olingan: *{purchases_count}* ta\n"
+        f"👥 Taklif qilingan: *{referrals_count}* ta\n📅 Sana: *{user['joined_at']}*\n\n"
+        f"🔑 ID: `{m.from_user.id}`",
+        parse_mode="Markdown"
+    )
 
 # ================= KUNLIK BONUS =================
 @dp.message(F.text == "🎁 Kunlik Bonus")
 async def daily_bonus(m: Message):
-    if not await sub_guard(m): return
+    if not await sub_guard(m):
+        return
     user = await get_user(m.from_user.id)
-    if not user: return await m.answer("❌ Avval ro'yxatdan o'ting! /start")
+    if not user:
+        return await m.answer("❌ Avval ro'yxatdan o'ting! /start")
     today = date.today()
     if user['last_bonus'] and user['last_bonus'] >= today:
         return await m.answer("⏳ *Bugun allaqachon bonus oldingiz!*\n\n🔄 Ertaga qaytib keling!", parse_mode="Markdown")
@@ -621,25 +743,40 @@ async def daily_bonus(m: Message):
 # ================= DO'ST TAKLIF =================
 @dp.message(F.text == "👥 Do'st Taklif Qilish")
 async def referral(m: Message):
-    if not await sub_guard(m): return
+    if not await sub_guard(m):
+        return
     bot_info = await bot.get_me()
     ref_link = f"https://t.me/{bot_info.username}?start=ref{m.from_user.id}"
     async with db_pool.acquire() as conn:
         cnt = await conn.fetchval("SELECT COUNT(*) FROM users WHERE referrer_id=$1", m.from_user.id)
-    await m.answer(f"👥 *Do'stlarni Taklif Qilish*\n━━━━━━━━━━━━━━━━━━\n\n🔗 Havolangiz:\n`{ref_link}`\n\n💰 Har bir do'st uchun: *+50 coin*\n👤 Taklif qilingan: *{cnt}* ta", parse_mode="Markdown")
+    await m.answer(
+        f"👥 *Do'stlarni Taklif Qilish*\n━━━━━━━━━━━━━━━━━━\n\n"
+        f"🔗 Havolangiz:\n`{ref_link}`\n\n"
+        f"💰 Har bir do'st uchun: *+50 coin*\n👤 Taklif qilingan: *{cnt}* ta",
+        parse_mode="Markdown"
+    )
 
 # ================= ADMINGA YOZISH =================
 @dp.message(F.text == "✍️ Adminga Yozish")
 async def write_to_admin(m: Message, state: FSMContext):
-    if not await sub_guard(m): return
+    if not await sub_guard(m):
+        return
     user = await get_user(m.from_user.id)
-    if not user: return await m.answer("❌ Avval ro'yxatdan o'ting! /start")
+    if not user:
+        return await m.answer("❌ Avval ro'yxatdan o'ting! /start")
     await state.set_state(BotState.in_active_chat)
     await state.update_data(chat_with=ADMIN_ID, is_user_side=True)
     await m.answer("✍️ *Adminga xabar yozing:*\n\nTugatish: /stop", parse_mode="Markdown", reply_markup=ReplyKeyboardRemove())
     try:
-        await bot.send_message(ADMIN_ID, f"📩 <b>Foydalanuvchi xabar yozmoqda!</b>\n\n👤 <b>{user['name']}</b> | ID: <code>{m.from_user.id}</code>", parse_mode="HTML")
-    except: pass
+        await bot.send_message(
+            ADMIN_ID,
+            f"📩 <b>Foydalanuvchi xabar yozmoqda!</b>\n\n"
+            f"👤 <b>{user['name']}</b> | ID: <code>{m.from_user.id}</code>\n\n"
+            "Javob: Admin Panel → 💬 Foydalanuvchi bilan Gaplash",
+            parse_mode="HTML"
+        )
+    except:
+        pass
 
 # ================= AKTIV CHAT =================
 @dp.message(BotState.in_active_chat)
@@ -656,15 +793,20 @@ async def active_chat(m: Message, state: FSMContext):
                     await bot.send_message(partner, f"📴 Foydalanuvchi ({m.from_user.id}) suhbatni tugatdi.", reply_markup=get_admin_kb())
                 else:
                     await bot.send_message(partner, "📴 Admin suhbatni tugatdi.", reply_markup=get_main_kb(partner))
-            except: pass
+            except:
+                pass
         return
+
     data = await state.get_data()
     partner = data.get("chat_with")
     is_user_side = data.get("is_user_side", True)
-    if not partner: return
+    if not partner:
+        return
+
     user = await get_user(m.from_user.id)
     name = user['name'] if user else m.from_user.full_name
     prefix = f"📩 *{name}* (ID: `{m.from_user.id}`):\n\n" if is_user_side else "👑 *Admin:*\n\n"
+
     try:
         if m.text:
             await bot.send_message(partner, f"{prefix}{m.text}", parse_mode="Markdown")
@@ -674,6 +816,7 @@ async def active_chat(m: Message, state: FSMContext):
             await bot.send_video(partner, m.video.file_id, caption=f"{prefix}{m.caption or ''}", parse_mode="Markdown")
         elif m.document:
             await bot.send_document(partner, m.document.file_id, caption=f"{prefix}{m.caption or ''}", parse_mode="Markdown")
+        # Faqat admin uchun tugma
         if not is_user_side:
             await m.answer("✅ Yuborildi! Tugatish: /stop", reply_markup=get_admin_end_chat_kb())
         else:
@@ -684,352 +827,22 @@ async def active_chat(m: Message, state: FSMContext):
 # ================= STATISTIKA =================
 @dp.message(F.text == "📊 Statistika")
 async def show_stats(m: Message):
-    if m.from_user.id != ADMIN_ID: return
+    if m.from_user.id != ADMIN_ID:
+        return
     s = await get_stats()
-    async with db_pool.acquire() as conn:
-        anime_count = await conn.fetchval("SELECT COUNT(*) FROM anime")
-        finished_count = await conn.fetchval("SELECT COUNT(*) FROM anime WHERE status='Tugallangan'")
-    await m.answer(f"📊 *BOT STATISTIKASI*\n━━━━━━━━━━━━━━━━━━\n\n👥 Jami: *{s['total_users']}*\n🆕 Bugun: *{s['today_users']}*\n🚫 Bloklangan: *{s['banned_users']}*\n🎬 Kinolar: *{s['total_movies']}*\n🛒 Sotuvlar: *{s['total_purchases']}*\n🌸 Jami Anime: *{anime_count}*\n✅ Tugallangan: *{finished_count}*", parse_mode="Markdown")
-
-# ======================================================
-# ======= FOYDALANUVCHI: ANIME BO'LIMI =================
-# ======================================================
-
-@dp.message(F.text == "🌸 Tugallangan Animalar")
-async def user_finished_anime(m: Message):
-    """Rasmdagiday: har bir anime rasm + ma'lumot + Ko'rish tugmasi"""
-    if not await sub_guard(m): return
-    finished = await anime_get_finished()
-    if not finished:
-        return await m.answer("❌ Hali tugallangan anime yo'q.")
-
-    await m.answer(f"✅ *Tugallangan Animalar* — {len(finished)} ta\n\nHar birining kartochkasi 👇", parse_mode="Markdown")
-
-    for anime in finished:
-        episodes = await episode_get_all(anime['custom_id'])
-        ep_count = len(episodes)
-        caption = (
-            f"*Anime: {anime['name']}*\n\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"↪ Holati: ✅ {anime['status']}\n"
-            f"↪ Sifat - {anime['quality']}\n"
-            f"↪ Janrlari: {anime['genres']}\n"
-            f"↪ Kanal: {anime['channel']}\n"
-            f"↪ Ovoz: {anime['voice']}\n"
-            f"━━━━━━━━━━━━━━━━━━\n\n"
-            f"📦 Botimiz: @anireplybot\n"
-            f"🆔 Anime ID: {anime['custom_id']}\n"
-            f"🔗 Link: t.me/anireplybot?start={anime['custom_id']}"
-        )
-        kb = InlineKeyboardBuilder()
-        kb.button(text=f"📺 Ko'rish ({ep_count} qism)", callback_data=f"aview_{anime['custom_id']}")
-
-        if anime['photo_id']:
-            await m.answer_photo(photo=anime['photo_id'], caption=caption, parse_mode="Markdown", reply_markup=kb.as_markup())
-        else:
-            await m.answer(caption, parse_mode="Markdown", reply_markup=kb.as_markup())
-
-
-@dp.message(F.text == "📋 Barcha Animalar")
-async def user_all_anime(m: Message):
-    if not await sub_guard(m): return
-    all_anime = await anime_get_all()
-    if not all_anime:
-        return await m.answer("❌ Hali anime qo'shilmagan.")
-
-    text = "📋 *Barcha Animalar:*\n━━━━━━━━━━━━━━━━━━\n\n"
-    for a in all_anime:
-        icon = "✅" if a['status'] == "Tugallangan" else "🔄"
-        eps = await episode_get_all(a['custom_id'])
-        text += f"{icon} `{a['custom_id']}` — *{a['name']}* ({len(eps)} qism)\n"
-
-    kb = InlineKeyboardBuilder()
-    for a in all_anime[:10]:
-        kb.button(text=f"▶️ {a['name']}", callback_data=f"aview_{a['custom_id']}")
-    kb.adjust(1)
-    await m.answer(text, parse_mode="Markdown", reply_markup=kb.as_markup())
-
-
-@dp.callback_query(F.data.startswith("aview_"))
-async def anime_view_callback(c: CallbackQuery):
-    """Anime qismlar tugmalarini rasmdagiday ko'rsatish"""
-    await c.answer()
-    custom_id = c.data.replace("aview_", "")
-    anime = await anime_get_by_id(custom_id)
-    if not anime: return await c.message.answer("❌ Anime topilmadi.")
-
-    episodes = await episode_get_all(custom_id)
-    if not episodes: return await c.message.answer("❌ Bu animeda hali qism yuklangan emas.")
-
-    caption = anime_info_caption(anime, len(episodes))
-    kb = build_episode_buttons(custom_id, episodes)
-
-    if anime['photo_id']:
-        await c.message.answer_photo(photo=anime['photo_id'], caption=caption, parse_mode="Markdown", reply_markup=kb)
-    else:
-        await c.message.answer(caption, parse_mode="Markdown", reply_markup=kb)
-
-
-@dp.callback_query(F.data.startswith("aep_"))
-async def anime_episode_callback(c: CallbackQuery):
-    """Qism raqami bosilganda video yuborish"""
-    await c.answer("⏳ Yuklanmoqda...")
-    parts = c.data.split("_")
-    custom_id = parts[1]
-    ep_num = int(parts[2])
-
-    anime = await anime_get_by_id(custom_id)
-    episode = await episode_get(custom_id, ep_num)
-
-    if not anime or not episode:
-        return await c.message.answer("❌ Qism topilmadi.")
-
-    await episode_increment_download(custom_id, ep_num)
-    ep_row = await episode_get(custom_id, ep_num)
-
-    caption = (
-        f"🎬 *{anime['name']}*\n"
-        f"📺 {ep_num}-Qism\n"
-        f"📥 Yuklangan: {ep_row['downloads']}"
-    )
-    await c.message.answer_video(video=episode['file_id'], caption=caption, parse_mode="Markdown")
-
-
-# ======================================================
-# ============== ADMIN: ANIME QO'SHISH =================
-# ======================================================
-
-@dp.callback_query(F.data == "adm_anime_add")
-async def admin_anime_add_start(c: CallbackQuery, state: FSMContext):
-    await c.answer()
-    if c.from_user.id != ADMIN_ID: return
-    await c.message.answer("📝 *Anime nomini kiriting:*", parse_mode="Markdown")
-    await state.set_state(BotState.anime_add_name)
-
-@dp.message(BotState.anime_add_name)
-async def anime_add_name(m: Message, state: FSMContext):
-    await state.update_data(anime_name=m.text.strip())
-    kb = InlineKeyboardBuilder()
-    kb.button(text="✅ Tugallangan", callback_data="ast_Tugallangan")
-    kb.button(text="🔄 Davom etmoqda", callback_data="ast_Davom etmoqda")
-    kb.button(text="⏸ Kutilmoqda", callback_data="ast_Kutilmoqda")
-    kb.adjust(1)
-    await m.answer("📊 *Holatini tanlang:*", parse_mode="Markdown", reply_markup=kb.as_markup())
-    await state.set_state(BotState.anime_add_status)
-
-@dp.callback_query(F.data.startswith("ast_"))
-async def anime_add_status_cb(c: CallbackQuery, state: FSMContext):
-    await c.answer()
-    status = c.data.replace("ast_", "")
-    await state.update_data(anime_status=status)
-    kb = InlineKeyboardBuilder()
-    kb.button(text="720p", callback_data="aq_720p")
-    kb.button(text="1080p", callback_data="aq_1080p")
-    kb.button(text="4K", callback_data="aq_4K")
-    kb.button(text="720p, 1080p", callback_data="aq_720p, 1080p")
-    kb.adjust(2)
-    await c.message.answer("🎥 *Sifatini tanlang:*", parse_mode="Markdown", reply_markup=kb.as_markup())
-    await state.set_state(BotState.anime_add_quality)
-
-@dp.callback_query(F.data.startswith("aq_"))
-async def anime_add_quality_cb(c: CallbackQuery, state: FSMContext):
-    await c.answer()
-    quality = c.data.replace("aq_", "")
-    await state.update_data(anime_quality=quality)
-    await c.message.answer("🏷 *Janrlarni kiriting* (vergul bilan):\n\nMisol: `Sarguzasht, Sehr, Komediya, O'zga dunyo`", parse_mode="Markdown")
-    await state.set_state(BotState.anime_add_genres)
-
-@dp.message(BotState.anime_add_genres)
-async def anime_add_genres_msg(m: Message, state: FSMContext):
-    await state.update_data(anime_genres=m.text.strip())
-    await m.answer("🆔 *Anime ID sini kiriting* (o'zingiz belgilang):\n\nMisol: `124` yoki `jodugar-124`", parse_mode="Markdown")
-    await state.set_state(BotState.anime_add_custom_id)
-
-@dp.message(BotState.anime_add_custom_id)
-async def anime_add_cid(m: Message, state: FSMContext):
-    custom_id = m.text.strip().replace(" ", "")
-    existing = await anime_get_by_id(custom_id)
-    if existing: return await m.answer(f"❌ Bu ID (`{custom_id}`) allaqachon mavjud! Boshqa ID kiriting:")
-    await state.update_data(anime_custom_id=custom_id)
-    await m.answer("📡 *Kanal nomini kiriting:*\nMisol: `@anireply`\n\n/skip — standart (@anireply)", parse_mode="Markdown")
-    await state.set_state(BotState.anime_add_channel)
-
-@dp.message(BotState.anime_add_channel)
-async def anime_add_channel_msg(m: Message, state: FSMContext):
-    await state.update_data(anime_channel="@anireply" if m.text == "/skip" else m.text.strip())
-    await m.answer("🎙 *Ovoz nomini kiriting:*\nMisol: `AniBla`\n\n/skip — standart (AniBla)", parse_mode="Markdown")
-    await state.set_state(BotState.anime_add_voice)
-
-@dp.message(BotState.anime_add_voice)
-async def anime_add_voice_msg(m: Message, state: FSMContext):
-    await state.update_data(anime_voice="AniBla" if m.text == "/skip" else m.text.strip())
-    await m.answer("🖼 *Anime rasmini yuboring:*\n\n/skip — rasmsiz qo'shish", parse_mode="Markdown")
-    await state.set_state(BotState.anime_add_photo)
-
-@dp.message(BotState.anime_add_photo, F.photo)
-async def anime_add_photo_msg(m: Message, state: FSMContext):
-    await _save_anime_to_db(m, state, m.photo[-1].file_id)
-
-@dp.message(BotState.anime_add_photo, F.text == "/skip")
-async def anime_add_photo_skip(m: Message, state: FSMContext):
-    await _save_anime_to_db(m, state, None)
-
-async def _save_anime_to_db(m, state, photo_id):
-    data = await state.get_data()
-    await state.clear()
-    await anime_add(data['anime_custom_id'], data['anime_name'], data['anime_status'], data['anime_quality'], data['anime_genres'], photo_id, data.get('anime_channel', '@anireply'), data.get('anime_voice', 'AniBla'))
     await m.answer(
-        f"✅ *Anime qo'shildi!*\n\n"
-        f"🎬 {data['anime_name']}\n"
-        f"🆔 ID: `{data['anime_custom_id']}`\n"
-        f"📊 Holat: {data['anime_status']}\n"
-        f"🎥 Sifat: {data['anime_quality']}\n"
-        f"🏷 Janr: {data['anime_genres']}\n\n"
-        f"📺 Qism qo'shish: *Admin Panel → Qism Qo'shish*",
-        parse_mode="Markdown", reply_markup=get_admin_kb()
+        f"📊 *BOT STATISTIKASI*\n━━━━━━━━━━━━━━━━━━\n\n"
+        f"👥 Jami: *{s['total_users']}*\n🆕 Bugun: *{s['today_users']}*\n"
+        f"🚫 Bloklangan: *{s['banned_users']}*\n🎬 Kinolar: *{s['total_movies']}*\n"
+        f"🛒 Sotuvlar: *{s['total_purchases']}*",
+        parse_mode="Markdown"
     )
 
-# ======================================================
-# ============== ADMIN: QISM QO'SHISH ==================
-# ======================================================
-
-@dp.callback_query(F.data == "adm_anime_ep")
-async def admin_anime_ep_start(c: CallbackQuery, state: FSMContext):
-    await c.answer()
-    if c.from_user.id != ADMIN_ID: return
-    all_anime = await anime_get_all()
-    if not all_anime: return await c.message.answer("❌ Avval anime qo'shing.")
-    text = "📋 *Mavjud Animalar:*\n━━━━━━━━━━━━━━━━━━\n\n"
-    for a in all_anime:
-        eps = await episode_get_all(a['custom_id'])
-        text += f"🆔 `{a['custom_id']}` — *{a['name']}* ({len(eps)} qism)\n"
-    text += "\n📌 *Anime ID sini kiriting:*"
-    await c.message.answer(text, parse_mode="Markdown")
-    await state.set_state(BotState.anime_ep_select)
-
-@dp.message(BotState.anime_ep_select)
-async def anime_ep_select_msg(m: Message, state: FSMContext):
-    custom_id = m.text.strip()
-    anime = await anime_get_by_id(custom_id)
-    if not anime: return await m.answer("❌ Bunday ID topilmadi. Qayta kiriting:")
-    await state.update_data(ep_anime_id=custom_id, ep_anime_name=anime['name'])
-    episodes = await episode_get_all(custom_id)
-    existing_nums = [str(ep['episode_num']) for ep in episodes]
-    next_ep = len(episodes) + 1
-    await m.answer(f"✅ *{anime['name']}*\nMavjud: {', '.join(existing_nums) if existing_nums else 'yo\\'q'}\n\n📝 *Qism raqamini kiriting* (tavsiya: {next_ep}):", parse_mode="Markdown")
-    await state.set_state(BotState.anime_ep_num)
-
-@dp.message(BotState.anime_ep_num)
-async def anime_ep_num_msg(m: Message, state: FSMContext):
-    if not m.text.isdigit() or int(m.text) < 1: return await m.answer("❌ Faqat musbat raqam kiriting:")
-    await state.update_data(ep_num=int(m.text))
-    data = await state.get_data()
-    await m.answer(f"🎬 *{data['ep_anime_name']}* — {m.text}-qism\n\n📹 *Video faylni yuboring:*", parse_mode="Markdown")
-    await state.set_state(BotState.anime_ep_video)
-
-@dp.message(BotState.anime_ep_video, F.video | F.document)
-async def anime_ep_video_msg(m: Message, state: FSMContext):
-    file_id = m.video.file_id if m.video else m.document.file_id
-    data = await state.get_data()
-    await state.clear()
-    await episode_add(data['ep_anime_id'], data['ep_num'], file_id)
-    all_eps = await episode_get_all(data['ep_anime_id'])
-    await m.answer(f"✅ *{data['ep_num']}-qism qo'shildi!*\n\n🎬 {data['ep_anime_name']}\n📺 Jami: *{len(all_eps)} ta*", parse_mode="Markdown", reply_markup=get_admin_kb())
-
-@dp.message(BotState.anime_ep_video)
-async def anime_ep_video_wrong(m: Message):
-    await m.answer("❌ Iltimos video fayl yuboring!")
-
-# ======================================================
-# ============ ADMIN: TUGALLANDI BELGILASH ==============
-# ======================================================
-
-@dp.callback_query(F.data == "adm_anime_finish")
-async def admin_anime_finish_start(c: CallbackQuery, state: FSMContext):
-    await c.answer()
-    if c.from_user.id != ADMIN_ID: return
-    all_anime = await anime_get_all()
-    not_finished = [a for a in all_anime if a['status'] != 'Tugallangan']
-    if not not_finished: return await c.message.answer("✅ Barcha animalar allaqachon tugallangan!")
-    text = "🔄 *Tugallanmagan Animalar:*\n━━━━━━━━━━━━━━━━━━\n\n"
-    for a in not_finished:
-        text += f"🆔 `{a['custom_id']}` — *{a['name']}*\n"
-    text += "\n✏️ *Tugallangan deb belgilash uchun ID kiriting:*"
-    await c.message.answer(text, parse_mode="Markdown")
-    await state.set_state(BotState.anime_finish_code)
-
-@dp.message(BotState.anime_finish_code)
-async def anime_finish_code_msg(m: Message, state: FSMContext):
-    custom_id = m.text.strip()
-    success = await anime_mark_finished(custom_id)
-    await state.clear()
-    if not success: return await m.answer(f"❌ ID `{custom_id}` topilmadi!", parse_mode="Markdown")
-    anime = await anime_get_by_id(custom_id)
-    await m.answer(
-        f"✅ *{anime['name']}* — tugallangan!\n\n"
-        f"🆔 ID: `{custom_id}`\n"
-        f"📊 Holat: ✅ Tugallangan\n\n"
-        f"Endi u *«🌸 Tugallangan Animalar»* bo'limida ko'rinadi.",
-        parse_mode="Markdown", reply_markup=get_admin_kb()
-    )
-
-# ======================================================
-# ============== ADMIN: ANIME O'CHIRISH ================
-# ======================================================
-
-@dp.callback_query(F.data == "adm_anime_delete")
-async def admin_anime_delete_start(c: CallbackQuery, state: FSMContext):
-    await c.answer()
-    if c.from_user.id != ADMIN_ID: return
-    all_anime = await anime_get_all()
-    if not all_anime: return await c.message.answer("❌ Hali anime yo'q.")
-    text = "🗑 *Barcha Animalar:*\n━━━━━━━━━━━━━━━━━━\n\n"
-    for a in all_anime:
-        text += f"🆔 `{a['custom_id']}` — *{a['name']}*\n"
-    text += "\n❗ *O'chirmoqchi bo'lgan anime ID sini kiriting:*"
-    await c.message.answer(text, parse_mode="Markdown")
-    await state.set_state(BotState.anime_delete_code)
-
-@dp.message(BotState.anime_delete_code)
-async def anime_delete_code_msg(m: Message, state: FSMContext):
-    custom_id = m.text.strip()
-    anime = await anime_get_by_id(custom_id)
-    await state.clear()
-    if not anime: return await m.answer(f"❌ ID `{custom_id}` topilmadi!", parse_mode="Markdown")
-    name = anime['name']
-    await anime_delete(custom_id)
-    await m.answer(f"🗑 *{name}* o'chirildi!\n(barcha qismlari ham o'chirildi)", parse_mode="Markdown", reply_markup=get_admin_kb())
-
-# ======================================================
-# ============== ADMIN: ANIMALAR RO'YXATI ==============
-# ======================================================
-
-@dp.callback_query(F.data == "adm_anime_list")
-async def admin_anime_list(c: CallbackQuery):
-    await c.answer()
-    if c.from_user.id != ADMIN_ID: return
-    all_anime = await anime_get_all()
-    kb = InlineKeyboardBuilder()
-    kb.button(text="🔙 Orqaga", callback_data="adm_close")
-    if not all_anime:
-        return await c.message.edit_text("❌ Hali anime yo'q.", reply_markup=kb.as_markup())
-    text = "📋 *Barcha Animalar:*\n━━━━━━━━━━━━━━━━━━\n\n"
-    for a in all_anime:
-        eps = await episode_get_all(a['custom_id'])
-        icon = "✅" if a['status'] == "Tugallangan" else "🔄"
-        text += f"{icon} `{a['custom_id']}` — *{a['name']}* | {len(eps)} qism\n"
-    try:
-        await c.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="Markdown")
-    except:
-        await bot.send_message(c.from_user.id, text, parse_mode="Markdown", reply_markup=kb.as_markup())
-
-# ======================================================
-# =================== ADMIN PANEL ======================
-# ======================================================
-
+# ================= ADMIN PANEL =================
 @dp.message(F.text == "👑 Admin Panel")
 async def admin_panel(m: Message, state: FSMContext):
-    if m.from_user.id != ADMIN_ID: return
+    if m.from_user.id != ADMIN_ID:
+        return
     await m.answer("🔐 Admin parolini kiriting:")
     await state.set_state(BotState.admin_auth)
 
@@ -1050,19 +863,27 @@ async def close_admin(c: CallbackQuery):
 @dp.callback_query(F.data == "adm_full_stats")
 async def full_stats(c: CallbackQuery):
     await c.answer()
-    if c.from_user.id != ADMIN_ID: return
+    if c.from_user.id != ADMIN_ID:
+        return
     s = await get_stats()
-    async with db_pool.acquire() as conn:
-        anime_count = await conn.fetchval("SELECT COUNT(*) FROM anime")
-        finished_count = await conn.fetchval("SELECT COUNT(*) FROM anime WHERE status='Tugallangan'")
-    await c.message.edit_text(f"📊 *TO'LIQ STATISTIKA*\n━━━━━━━━━━━━━━━━━━\n\n👥 Jami: *{s['total_users']}*\n🆕 Bugun: *{s['today_users']}*\n🚫 Bloklangan: *{s['banned_users']}*\n🎬 Kinolar: *{s['total_movies']}*\n🛒 Sotuvlar: *{s['total_purchases']}*\n🌸 Jami Anime: *{anime_count}*\n✅ Tugallangan: *{finished_count}*", parse_mode="Markdown", reply_markup=get_admin_kb())
+    await c.message.edit_text(
+        f"📊 *TO'LIQ STATISTIKA*\n━━━━━━━━━━━━━━━━━━\n\n"
+        f"👥 Jami: *{s['total_users']}*\n🆕 Bugun: *{s['today_users']}*\n"
+        f"🚫 Bloklangan: *{s['banned_users']}*\n🎬 Kinolar: *{s['total_movies']}*\n"
+        f"🛒 Sotuvlar: *{s['total_purchases']}*",
+        parse_mode="Markdown", reply_markup=get_admin_kb()
+    )
 
+# ================= OBUNA LOGLARI =================
 @dp.callback_query(F.data == "adm_sub_logs")
 async def admin_sub_logs(c: CallbackQuery):
     await c.answer()
-    if c.from_user.id != ADMIN_ID: return
+    if c.from_user.id != ADMIN_ID:
+        return
     async with db_pool.acquire() as conn:
-        logs = await conn.fetch("SELECT user_id, user_name, channel_title, channel_link, event, event_time FROM sub_logs ORDER BY event_time DESC LIMIT 40")
+        logs = await conn.fetch(
+            "SELECT user_id, user_name, channel_title, channel_link, event, event_time FROM sub_logs ORDER BY event_time DESC LIMIT 40"
+        )
     if not logs:
         kb = InlineKeyboardBuilder()
         kb.button(text="🔙 Orqaga", callback_data="sub_back")
@@ -1080,13 +901,18 @@ async def admin_sub_logs(c: CallbackQuery):
     except:
         await bot.send_message(c.from_user.id, text, parse_mode="Markdown")
 
+# ================= FOYDALANUVCHILAR RO'YXATI =================
 @dp.callback_query(F.data == "adm_users")
 async def admin_users_list(c: CallbackQuery):
     await c.answer()
-    if c.from_user.id != ADMIN_ID: return
+    if c.from_user.id != ADMIN_ID:
+        return
     async with db_pool.acquire() as conn:
-        users = await conn.fetch("SELECT user_id, name, phone, coins, joined_at, is_banned FROM users ORDER BY joined_at DESC LIMIT 50")
-    if not users: return await c.message.answer("📭 Hali foydalanuvchilar yo'q!")
+        users = await conn.fetch(
+            "SELECT user_id, name, phone, coins, joined_at, is_banned FROM users ORDER BY joined_at DESC LIMIT 50"
+        )
+    if not users:
+        return await c.message.answer("📭 Hali foydalanuvchilar yo'q!")
     text = "👥 *FOYDALANUVCHILAR*\n━━━━━━━━━━━━━━━━━━\n\n"
     for i, u in enumerate(users, 1):
         s = "🚫" if u['is_banned'] else "✅"
@@ -1099,10 +925,12 @@ async def admin_users_list(c: CallbackQuery):
     except:
         await bot.send_message(c.from_user.id, text, parse_mode="Markdown")
 
+# ================= MAJBURIY OBUNA BOSHQARUVI =================
 @dp.callback_query(F.data == "adm_subscription")
 async def admin_subscription_menu(c: CallbackQuery):
     await c.answer()
-    if c.from_user.id != ADMIN_ID: return
+    if c.from_user.id != ADMIN_ID:
+        return
     channels = await get_required_channels()
     kb = InlineKeyboardBuilder()
     kb.button(text="➕ Kanal Qo'shish", callback_data="sub_add")
@@ -1116,6 +944,7 @@ async def admin_subscription_menu(c: CallbackQuery):
         for ch in channels:
             t = "📱 TG" if is_telegram_link(ch['link']) else "🌐 Tashqi"
             text += f"• [{ch['title']}]({ch['link']}) — {t}\n"
+        text += "\n💡 TG: API tekshiruv | Tashqi: foydalanuvchi tasdiqlaydi"
     else:
         text += "📭 Hozircha kanallar yo'q."
     await c.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="Markdown", disable_web_page_preview=True)
@@ -1128,8 +957,14 @@ async def sub_back(c: CallbackQuery):
 @dp.callback_query(F.data == "sub_add")
 async def sub_add_start(c: CallbackQuery, state: FSMContext):
     await c.answer()
-    if c.from_user.id != ADMIN_ID: return
-    await c.message.answer("🔗 *Kanal linkini yuboring:*\n\n📱 Telegram: `https://t.me/kanalnom`\n🌐 Tashqi: `https://instagram.com/nom`", parse_mode="Markdown")
+    if c.from_user.id != ADMIN_ID:
+        return
+    await c.message.answer(
+        "🔗 *Kanal linkini yuboring:*\n\n"
+        "📱 Telegram: `https://t.me/kanalnom`\n"
+        "🌐 Tashqi: `https://instagram.com/nom`",
+        parse_mode="Markdown"
+    )
     await state.set_state(BotState.adding_sub_link)
 
 @dp.message(BotState.adding_sub_link)
@@ -1149,34 +984,44 @@ async def sub_get_title(m: Message, state: FSMContext):
         title = m.text.strip()
         await add_required_channel(link, title)
         await state.clear()
-        note = "⚠️ Botni kanalga admin qilib qo'shing!" if is_telegram_link(link) else "✅ Tashqi kanal."
-        await m.answer(f"✅ <b>Kanal qo'shildi!</b>\n\n📛 {title}\n🔗 <code>{link}</code>\n\n{note}", parse_mode="HTML", disable_web_page_preview=True, reply_markup=get_admin_kb())
+        note = "⚠️ Botni kanalga admin qilib qo'shing!" if is_telegram_link(link) else "✅ Tashqi kanal — foydalanuvchi tasdiqlaydi."
+        await m.answer(
+            f"✅ <b>Kanal qo'shildi!</b>\n\n📛 {title}\n🔗 <code>{link}</code>\n\n{note}",
+            parse_mode="HTML", disable_web_page_preview=True, reply_markup=get_admin_kb()
+        )
         asyncio.create_task(broadcast_new_sub())
     except Exception as e:
         await state.clear()
         await m.answer(f"❌ Xatolik: {e}")
 
 async def broadcast_new_sub():
+    """Yangi kanal qo'shilganda barcha foydalanuvchilarga obuna xabari."""
     try:
         all_users = await get_all_users()
         for u in all_users:
-            if u['user_id'] == ADMIN_ID: continue
+            if u['user_id'] == ADMIN_ID:
+                continue
             try:
                 user = await get_user(u['user_id'])
-                if not user: continue
+                if not user:
+                    continue
                 not_sub = await check_all_subs(u['user_id'], user['name'])
-                if not_sub: await send_sub_msg(u['user_id'], not_sub)
+                if not_sub:
+                    await send_sub_msg(u['user_id'], not_sub)
                 await asyncio.sleep(0.05)
-            except: pass
+            except:
+                pass
     except Exception as e:
         logger.error(f"broadcast_new_sub xato: {e}")
 
 @dp.callback_query(F.data == "sub_del_list")
 async def sub_del_list(c: CallbackQuery):
     await c.answer()
-    if c.from_user.id != ADMIN_ID: return
+    if c.from_user.id != ADMIN_ID:
+        return
     channels = await get_required_channels()
-    if not channels: return await c.message.answer("📭 Kanallar yo'q!")
+    if not channels:
+        return await c.message.answer("📭 Kanallar yo'q!")
     kb = InlineKeyboardBuilder()
     for ch in channels:
         kb.button(text=f"🗑 {ch['title']}", callback_data=f"sub_del_{ch['id']}")
@@ -1186,7 +1031,8 @@ async def sub_del_list(c: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("sub_del_"))
 async def sub_del_confirm(c: CallbackQuery):
-    if c.from_user.id != ADMIN_ID: return await c.answer("❌ Ruxsat yo'q!", show_alert=True)
+    if c.from_user.id != ADMIN_ID:
+        return await c.answer("❌ Ruxsat yo'q!", show_alert=True)
     channel_id = int(c.data.split("_")[2])
     async with db_pool.acquire() as conn:
         ch = await conn.fetchrow("SELECT title FROM required_channels WHERE id=$1", channel_id)
@@ -1201,16 +1047,19 @@ async def sub_del_confirm(c: CallbackQuery):
     text = "🗑 *Kanal tanlang:*" if channels else "📭 *Barcha kanallar o'chirildi.*"
     await c.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="Markdown")
 
+# ================= COIN QO'SHISH =================
 @dp.callback_query(F.data == "adm_add_coin")
 async def add_coin_start(c: CallbackQuery, state: FSMContext):
     await c.answer()
-    if c.from_user.id != ADMIN_ID: return
+    if c.from_user.id != ADMIN_ID:
+        return
     await c.message.answer("💰 Foydalanuvchi *ID* sini kiriting:", parse_mode="Markdown")
     await state.set_state(BotState.add_coin_id)
 
 @dp.message(BotState.add_coin_id)
 async def add_coin_get_id(m: Message, state: FSMContext):
-    if not m.text.isdigit(): return await m.answer("⚠️ Faqat ID raqamini kiriting!")
+    if not m.text.isdigit():
+        return await m.answer("⚠️ Faqat ID raqamini kiriting!")
     user = await get_user(int(m.text))
     if not user:
         await state.clear()
@@ -1221,7 +1070,8 @@ async def add_coin_get_id(m: Message, state: FSMContext):
 
 @dp.message(BotState.add_coin_amount)
 async def add_coin_process(m: Message, state: FSMContext):
-    if not m.text.isdigit() or int(m.text) <= 0: return await m.answer("⚠️ Musbat son kiriting!")
+    if not m.text.isdigit() or int(m.text) <= 0:
+        return await m.answer("⚠️ Musbat son kiriting!")
     data = await state.get_data()
     uid = data['target_user_id']
     amount = int(m.text)
@@ -1232,18 +1082,22 @@ async def add_coin_process(m: Message, state: FSMContext):
     await m.answer(f"✅ *+{amount} coin* qo'shildi!\n💰 Yangi balans: *{updated['coins']} coin*", parse_mode="Markdown", reply_markup=get_admin_kb())
     try:
         await bot.send_message(uid, f"🎉 Sizga *+{amount} coin* qo'shildi!\n💰 Balans: *{updated['coins']} coin*", parse_mode="Markdown")
-    except: pass
+    except:
+        pass
 
+# ================= COIN OLISH =================
 @dp.callback_query(F.data == "adm_remove_coin")
 async def remove_coin_start(c: CallbackQuery, state: FSMContext):
     await c.answer()
-    if c.from_user.id != ADMIN_ID: return
+    if c.from_user.id != ADMIN_ID:
+        return
     await c.message.answer("💸 Foydalanuvchi *ID* sini kiriting:", parse_mode="Markdown")
     await state.set_state(BotState.remove_coin_id)
 
 @dp.message(BotState.remove_coin_id)
 async def remove_coin_get_id(m: Message, state: FSMContext):
-    if not m.text.isdigit(): return await m.answer("⚠️ Faqat ID raqamini kiriting!")
+    if not m.text.isdigit():
+        return await m.answer("⚠️ Faqat ID raqamini kiriting!")
     user = await get_user(int(m.text))
     if not user:
         await state.clear()
@@ -1254,7 +1108,8 @@ async def remove_coin_get_id(m: Message, state: FSMContext):
 
 @dp.message(BotState.remove_coin_amount)
 async def remove_coin_process(m: Message, state: FSMContext):
-    if not m.text.isdigit() or int(m.text) <= 0: return await m.answer("⚠️ Musbat son kiriting!")
+    if not m.text.isdigit() or int(m.text) <= 0:
+        return await m.answer("⚠️ Musbat son kiriting!")
     data = await state.get_data()
     uid = data['target_user_id']
     amount = int(m.text)
@@ -1269,12 +1124,15 @@ async def remove_coin_process(m: Message, state: FSMContext):
     await m.answer(f"✅ *-{amount} coin* yechildi!\n💰 Yangi balans: *{updated['coins']} coin*", parse_mode="Markdown", reply_markup=get_admin_kb())
     try:
         await bot.send_message(uid, f"⚠️ Sizdan *-{amount} coin* yechildi!\n💰 Balans: *{updated['coins']} coin*", parse_mode="Markdown")
-    except: pass
+    except:
+        pass
 
+# ================= KINO QO'SHISH =================
 @dp.callback_query(F.data == "adm_add_kino")
 async def add_kino_start(c: CallbackQuery, state: FSMContext):
     await c.answer()
-    if c.from_user.id != ADMIN_ID: return
+    if c.from_user.id != ADMIN_ID:
+        return
     await c.message.answer("🎬 *Kino nomini kiriting:*", parse_mode="Markdown")
     await state.set_state(BotState.adding_k_name)
 
@@ -1315,18 +1173,25 @@ async def set_k_file_link(m: Message, state: FSMContext):
 
 @dp.message(BotState.adding_k_price)
 async def save_kino(m: Message, state: FSMContext):
-    if not m.text.isdigit(): return await m.answer("⚠️ Faqat raqam kiriting!")
+    if not m.text.isdigit():
+        return await m.answer("⚠️ Faqat raqam kiriting!")
     data = await state.get_data()
     new_id = await add_movie(data['k_name'], data['k_year'], data.get('k_desc', ''), data.get('k_file'), int(m.text))
     await state.clear()
-    await m.answer(f"✅ *Kino qo'shildi!*\n\n🆔 Kod: `{new_id}`\n🎬 {data['k_name']}\n📅 {data['k_year']}\n💰 {m.text} coin", parse_mode="Markdown", reply_markup=get_admin_kb())
+    await m.answer(
+        f"✅ *Kino qo'shildi!*\n\n🆔 Kod: `{new_id}`\n🎬 {data['k_name']}\n📅 {data['k_year']}\n💰 {m.text} coin",
+        parse_mode="Markdown", reply_markup=get_admin_kb()
+    )
 
+# ================= KINO O'CHIRISH =================
 @dp.callback_query(F.data == "adm_del_kino")
 async def del_kino_start(c: CallbackQuery):
     await c.answer()
-    if c.from_user.id != ADMIN_ID: return
+    if c.from_user.id != ADMIN_ID:
+        return
     movies = await get_all_movies()
-    if not movies: return await c.message.answer("📽 Kinolar yo'q!")
+    if not movies:
+        return await c.message.answer("📽 Kinolar yo'q!")
     kb = InlineKeyboardBuilder()
     for movie in movies:
         kb.button(text=f"🗑 {movie['name']} ({movie['id']})", callback_data=f"del_movie_{movie['id']}")
@@ -1337,17 +1202,20 @@ async def del_kino_start(c: CallbackQuery):
 @dp.callback_query(F.data.startswith("del_movie_"))
 async def delete_movie(c: CallbackQuery):
     await c.answer()
-    if c.from_user.id != ADMIN_ID: return
+    if c.from_user.id != ADMIN_ID:
+        return
     movie_id = int(c.data.split("_")[2])
     async with db_pool.acquire() as conn:
         movie = await conn.fetchrow("SELECT name FROM movies WHERE id=$1", movie_id)
         await conn.execute("DELETE FROM movies WHERE id=$1", movie_id)
     await c.message.edit_text(f"✅ *{movie['name']}* o'chirildi!", parse_mode="Markdown", reply_markup=get_admin_kb())
 
+# ================= REKLAMA =================
 @dp.callback_query(F.data == "adm_broadcast")
 async def broadcast_start(c: CallbackQuery, state: FSMContext):
     await c.answer()
-    if c.from_user.id != ADMIN_ID: return
+    if c.from_user.id != ADMIN_ID:
+        return
     await c.message.answer("📢 *Yubormoqchi bo'lgan xabarni yuboring:*", parse_mode="Markdown")
     await state.set_state(BotState.sending_broadcast)
 
@@ -1363,62 +1231,81 @@ async def process_broadcast(m: Message, state: FSMContext):
             count += 1
             await asyncio.sleep(0.05)
             if i % 20 == 0:
-                try: await status_msg.edit_text(f"⏳ Yuborilmoqda... {i}/{len(users)}")
-                except: pass
-        except: failed += 1
+                try:
+                    await status_msg.edit_text(f"⏳ Yuborilmoqda... {i}/{len(users)}")
+                except:
+                    pass
+        except:
+            failed += 1
     await status_msg.edit_text(f"✅ *Reklama yuborildi!*\n\n📨 Muvaffaqiyatli: *{count}*\n❌ Yuborilmagan: *{failed}*", parse_mode="Markdown")
 
+# ================= BLOKLASH =================
 @dp.callback_query(F.data == "adm_ban")
 async def ban_start(c: CallbackQuery, state: FSMContext):
     await c.answer()
-    if c.from_user.id != ADMIN_ID: return
+    if c.from_user.id != ADMIN_ID:
+        return
     await c.message.answer("🚫 Bloklash uchun foydalanuvchi *ID* sini kiriting:", parse_mode="Markdown")
     await state.set_state(BotState.blocking_id)
 
 @dp.message(BotState.blocking_id)
 async def process_ban(m: Message, state: FSMContext):
     await state.clear()
-    if not m.text.isdigit(): return await m.answer("⚠️ Faqat ID kiriting!")
+    if not m.text.isdigit():
+        return await m.answer("⚠️ Faqat ID kiriting!")
     uid = int(m.text)
     async with db_pool.acquire() as conn:
         await conn.execute("UPDATE users SET is_banned=TRUE WHERE user_id=$1", uid)
     try:
         await bot.send_message(uid, "🚫 Siz botdan bloklangansiz.", reply_markup=ReplyKeyboardRemove())
-    except: pass
+    except:
+        pass
     await m.answer(f"✅ Foydalanuvchi (ID: `{uid}`) bloklandi!", parse_mode="Markdown", reply_markup=get_admin_kb())
 
+# ================= BLOKDAN CHIQARISH =================
 @dp.callback_query(F.data == "adm_unban")
 async def unban_start(c: CallbackQuery, state: FSMContext):
     await c.answer()
-    if c.from_user.id != ADMIN_ID: return
-    await c.message.answer("✅ Blokdan chiqarish uchun *ID* sini kiriting:", parse_mode="Markdown")
+    if c.from_user.id != ADMIN_ID:
+        return
+    await c.message.answer("✅ Blokdan chiqarish uchun foydalanuvchi *ID* sini kiriting:", parse_mode="Markdown")
     await state.set_state(BotState.unblocking_id)
 
 @dp.message(BotState.unblocking_id)
 async def process_unban(m: Message, state: FSMContext):
     await state.clear()
-    if not m.text.isdigit(): return await m.answer("⚠️ Faqat ID kiriting!")
+    if not m.text.isdigit():
+        return await m.answer("⚠️ Faqat ID kiriting!")
     uid = int(m.text)
     async with db_pool.acquire() as conn:
         await conn.execute("UPDATE users SET is_banned=FALSE WHERE user_id=$1", uid)
     try:
         await bot.send_message(uid, "✅ Blokingiz olib tashlandi! /start")
-    except: pass
+    except:
+        pass
     await m.answer(f"✅ Foydalanuvchi (ID: `{uid}`) blokdan chiqarildi!", parse_mode="Markdown", reply_markup=get_admin_kb())
 
+# ================= ADMIN CHAT =================
 @dp.callback_query(F.data == "adm_start_chat")
 async def admin_chat_init(c: CallbackQuery, state: FSMContext):
     await c.answer()
-    if c.from_user.id != ADMIN_ID: return
+    if c.from_user.id != ADMIN_ID:
+        return
     await state.clear()
     await state.set_state(BotState.admin_chat_target)
-    await c.message.answer("💬 *Gaplashmoqchi bo'lgan foydalanuvchi ID sini kiriting:*", parse_mode="Markdown")
+    await c.message.answer(
+        "💬 *Gaplashmoqchi bo'lgan foydalanuvchi ID sini kiriting:*\n\n"
+        "_(Foydalanuvchi 'Hisobim' bo'limida ID sini ko'rishi mumkin)_",
+        parse_mode="Markdown"
+    )
 
 @dp.message(BotState.admin_chat_target)
 async def admin_ask_user(m: Message, state: FSMContext):
-    if not m.text or not m.text.strip().isdigit(): return await m.answer("⚠️ Faqat ID raqamini kiriting!")
+    if not m.text or not m.text.strip().isdigit():
+        return await m.answer("⚠️ Faqat ID raqamini kiriting!")
     target_id = int(m.text.strip())
-    if target_id == ADMIN_ID: return await m.answer("⚠️ O'zingizga xabar yubora olmaysiz!")
+    if target_id == ADMIN_ID:
+        return await m.answer("⚠️ O'zingizga xabar yubora olmaysiz!")
     target_user = await get_user(target_id)
     if not target_user:
         await state.clear()
@@ -1428,10 +1315,17 @@ async def admin_ask_user(m: Message, state: FSMContext):
     kb.button(text="❌ Yo'q, rad etaman", callback_data=f"chat_no_{ADMIN_ID}")
     kb.adjust(1)
     try:
-        await bot.send_message(target_id, "🔔 <b>Admin siz bilan bog'lanmoqchi!</b>\n\nSuhbatga rozimisiz?", reply_markup=kb.as_markup(), parse_mode="HTML")
+        await bot.send_message(
+            target_id,
+            "🔔 <b>Admin siz bilan bog'lanmoqchi!</b>\n\nSuhbatga rozimisiz?",
+            reply_markup=kb.as_markup(), parse_mode="HTML"
+        )
         await state.set_state(BotState.in_active_chat)
         await state.update_data(chat_with=target_id, is_user_side=False)
-        await m.answer(f"✅ So'rov yuborildi!\n👤 *{target_user['name']}* | ID: `{target_id}`\n\nBekor qilish: /stop", parse_mode="Markdown", reply_markup=get_admin_end_chat_kb())
+        await m.answer(
+            f"✅ So'rov yuborildi!\n\n👤 *{target_user['name']}* | ID: `{target_id}`\n\n⏳ Javob kutilmoqda...\nBekor qilish: /stop",
+            parse_mode="Markdown", reply_markup=get_admin_end_chat_kb()
+        )
     except Exception as e:
         await state.clear()
         await m.answer(f"❌ Xabar yuborib bo'lmadi: {e}")
@@ -1442,10 +1336,16 @@ async def chat_accept(c: CallbackQuery, state: FSMContext):
     admin_id = int(c.data.split("_")[2])
     await state.set_state(BotState.in_active_chat)
     await state.update_data(chat_with=admin_id, is_user_side=True)
+    # Foydalanuvchiga FAQAT /stop, tugma yo'q
     await c.message.edit_text("✅ <b>Aloqa o'rnatildi!</b>\n\n💬 Xabaringizni yozing.\nTugatish: /stop", parse_mode="HTML")
     try:
-        await bot.send_message(admin_id, f"✅ *Foydalanuvchi ({c.from_user.id}) suhbatga kirdi!*\nTugatish: /stop", parse_mode="Markdown", reply_markup=get_admin_end_chat_kb())
-    except: pass
+        await bot.send_message(
+            admin_id,
+            f"✅ *Foydalanuvchi ({c.from_user.id}) suhbatga kirdi!*\nXabar yubora olasiz.\nTugatish: /stop",
+            parse_mode="Markdown", reply_markup=get_admin_end_chat_kb()
+        )
+    except:
+        pass
 
 @dp.callback_query(F.data.startswith("chat_no_"))
 async def chat_reject(c: CallbackQuery):
@@ -1454,31 +1354,36 @@ async def chat_reject(c: CallbackQuery):
     await c.message.edit_text("❌ Siz suhbatni rad etdingiz.")
     try:
         await bot.send_message(admin_id, f"😔 Foydalanuvchi ({c.from_user.id}) suhbatlashishni istamadi.", reply_markup=get_admin_kb())
-    except: pass
+    except:
+        pass
 
 @dp.callback_query(F.data == "end_chat")
 async def end_chat_callback(c: CallbackQuery, state: FSMContext):
-    if c.from_user.id != ADMIN_ID: return await c.answer("❌ Bu tugma faqat admin uchun!", show_alert=True)
+    if c.from_user.id != ADMIN_ID:
+        return await c.answer("❌ Bu tugma faqat admin uchun!", show_alert=True)
     await c.answer()
     data = await state.get_data()
     partner = data.get("chat_with")
     await state.clear()
     try:
         await c.message.edit_text("🔴 *Aloqa tugadi.*", parse_mode="Markdown")
-    except: pass
+    except:
+        pass
     await bot.send_message(c.from_user.id, "📴 Suhbat yakunlandi.", reply_markup=get_admin_kb())
     if partner:
         try:
             await bot.send_message(partner, "📴 Admin suhbatni tugatdi.", reply_markup=get_main_kb(partner))
-        except: pass
+        except:
+            pass
 
+# ================= GLOBAL HANDLER =================
 @dp.message()
 async def global_message_handler(m: Message, state: FSMContext):
     user = await get_user(m.from_user.id)
     if user and user['is_banned']:
         await m.answer("🚫 Siz botdan bloklangansiz.")
 
-# ================= MAIN =================
+# ================= BOTNI ISHGA TUSHIRISH =================
 async def main():
     keep_alive()
     await init_db()
