@@ -469,11 +469,39 @@ class BotState(StatesGroup):
 TYPE_EMOJI = {'kino': '🎬', 'anime': '🎌', 'drama': '🎭'}
 TYPE_NAME = {'kino': 'Kino', 'anime': 'Anime', 'drama': 'Drama'}
 
+def get_coin_rank(coins: int) -> str:
+    """Coin miqdoriga qarab daraja va nom beradi."""
+    if coins <= 0:
+        return "💀 Tilanchivoy"
+    elif coins <= 50:
+        return "🪨 Kambag'al"
+    elif coins <= 150:
+        return "🌾 Oddiy"
+    elif coins <= 300:
+        return "🥉 O'rtahol"
+    elif coins <= 500:
+        return "🥈 Munosib"
+    elif coins <= 1000:
+        return "🥇 Badavlat"
+    elif coins <= 2000:
+        return "💰 Boy"
+    elif coins <= 5000:
+        return "💎 Millioner"
+    elif coins <= 10000:
+        return "👑 Magnit"
+    elif coins <= 50000:
+        return "🔱 Oligarx"
+    elif coins <= 100000:
+        return "🌟 VIP"
+    else:
+        return "🚀 SUPER VIP"
+
 def get_main_kb(uid: int):
     builder = ReplyKeyboardBuilder()
     builder.button(text="🎬 Kinolar")
     builder.button(text="🎌 Animelar")
     builder.button(text="🎭 Dramalar")
+    builder.button(text="🎟 Kino Sotib Olish")
     builder.button(text="💰 Hisobim")
     builder.button(text="🎁 Kunlik Bonus")
     builder.button(text="👥 Do'st Taklif Qilish")
@@ -481,7 +509,7 @@ def get_main_kb(uid: int):
     if uid == ADMIN_ID:
         builder.button(text="👑 Admin Panel")
         builder.button(text="📊 Statistika")
-    builder.adjust(3, 2, 2)
+    builder.adjust(3, 1, 2, 2)
     return builder.as_markup(resize_keyboard=True)
 
 def get_admin_kb():
@@ -597,7 +625,7 @@ async def start_cmd(m: Message, state: FSMContext):
         await state.set_state(BotState.waiting_name)
 
 # ================= KONTENT DETAIL KO'RSATISH =================
-async def show_content_detail(chat_id: int, content_id: int, message_id: int = None):
+async def show_content_detail(chat_id: int, content_id: int, user_id: int = None):
     """Kontent ma'lumotlarini ko'rsatadi (poster + info + qism tugmalari)."""
     c = await get_content(content_id)
     if not c:
@@ -607,29 +635,63 @@ async def show_content_detail(chat_id: int, content_id: int, message_id: int = N
             pass
         return
 
+    uid = user_id or chat_id
     episodes = await get_episodes(content_id)
     text = format_content_info(c, episodes)
 
-    # Bot username ni to'ldirish
-    try:
-        bot_info = await bot.get_me()
-        text = text.replace("@botusername", bot_info.username)
-        text = text.replace("t.me/@", f"t.me/")
-    except:
-        pass
+    kb = InlineKeyboardBuilder()
 
-    kb = None
+    is_free = c['price'] == 0
+    already_bought = await user_has_content(uid, content_id)
+
     if episodes:
-        kb = build_episode_kb(content_id, episodes)
+        if is_free or already_bought:
+            # Tomosha qilish tugmasi + qism raqamlari
+            nums = sorted([ep['episode_number'] for ep in episodes])
+            row = []
+            for n in nums:
+                row.append(InlineKeyboardButton(text=str(n), callback_data=f"ep_{content_id}_{n}"))
+            kb.row(InlineKeyboardButton(text="🎬 Tomosha qilish", callback_data=f"watch_{content_id}"))
+            for i in range(0, len(row), 6):
+                kb.row(*row[i:i+6])
+        else:
+            # Sotib olish tugmasi
+            kb.button(text=f"🛒 {c['price']} coin to'lab sotib olish", callback_data=f"confirm_buy_{content_id}")
+            kb.button(text="❌ Yo'q, shart emas", callback_data="cancel_buy")
+            kb.adjust(1)
+    elif c.get('link'):
+        if is_free or already_bought:
+            kb.button(text="🎬 Tomosha qilish", url=c['link'])
+        else:
+            kb.button(text=f"🛒 {c['price']} coin to'lab sotib olish", callback_data=f"confirm_buy_{content_id}")
+            kb.button(text="❌ Yo'q, shart emas", callback_data="cancel_buy")
+            kb.adjust(1)
+
+    markup = kb.as_markup() if kb.buttons else None
 
     if c['poster_file_id']:
         try:
             await bot.send_photo(chat_id, c['poster_file_id'], caption=text,
-                                 parse_mode="HTML", reply_markup=kb)
+                                 parse_mode="HTML", reply_markup=markup)
         except:
-            await bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=kb)
+            await bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=markup)
     else:
-        await bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=kb)
+        await bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=markup)
+
+@dp.callback_query(F.data.startswith("watch_"))
+async def watch_content(c: CallbackQuery):
+    """Tomosha qilish bosilganda qism tanlash."""
+    await c.answer()
+    content_id = int(c.data.split("_")[1])
+    episodes = await get_episodes(content_id)
+    if not episodes:
+        return await c.answer("❌ Qismlar hali qo'shilmagan!", show_alert=True)
+    kb = InlineKeyboardBuilder()
+    nums = sorted([ep['episode_number'] for ep in episodes])
+    row = [InlineKeyboardButton(text=str(n), callback_data=f"ep_{content_id}_{n}") for n in nums]
+    for i in range(0, len(row), 6):
+        kb.row(*row[i:i+6])
+    await c.message.answer("📺 <b>Qaysi qismni ko'rmoqchisiz?</b>", parse_mode="HTML", reply_markup=kb.as_markup())
 
 # ================= QISM YUBORISH CALLBACK =================
 @dp.callback_query(F.data.startswith("ep_"))
@@ -643,23 +705,22 @@ async def send_episode(c: CallbackQuery):
     if not content:
         return await c.answer("❌ Kontent topilmadi!", show_alert=True)
 
-    # Narx tekshirish
     user = await get_user(c.from_user.id)
     if not user:
         return await c.answer("❌ Avval ro'yxatdan o'ting!", show_alert=True)
 
+    # Pullik va sotib olinmagan
     if content['price'] > 0 and not await user_has_content(c.from_user.id, content_id):
-        # Sotib olish taklif qilish
         kb = InlineKeyboardBuilder()
-        kb.button(text=f"✅ {content['price']} coin to'layman", callback_data=f"confirm_buy_{content_id}")
-        kb.button(text="❌ Bekor qilish", callback_data="cancel_buy")
+        kb.button(text=f"🛒 {content['price']} coin to'lab sotib olish", callback_data=f"confirm_buy_{content_id}")
+        kb.button(text="❌ Yo'q, shart emas", callback_data="cancel_buy")
         kb.adjust(1)
         await bot.send_message(
             c.from_user.id,
-            f"💎 Bu kontent pullik!\n\n"
+            f"🔒 <b>Bu kontent pullik!</b>\n\n"
             f"🎬 <b>{content['name']}</b>\n"
-            f"💰 Narx: <b>{content['price']} coin</b>\n"
-            f"💳 Sizda: <b>{user['coins']} coin</b>\n\nSotib olasizmi?",
+            f"💎 Narx: <b>{content['price']} coin</b>\n"
+            f"💰 Sizda: <b>{user['coins']} coin</b>",
             reply_markup=kb.as_markup(), parse_mode="HTML"
         )
         return
@@ -799,14 +860,35 @@ async def show_content_list(m: Message, content_type: str):
     await m.answer(text, parse_mode="HTML")
 
 # ================= KONTENT OLISH (SOTIB OLISH) =================
-@dp.message(F.text == "🎟 Kontent Olish")
+@dp.message(F.text == "🎟 Kino Sotib Olish")
 async def buy_content_start(m: Message, state: FSMContext):
     if not await sub_guard(m):
         return
     user = await get_user(m.from_user.id)
     if not user:
         return await m.answer("❌ Avval ro'yxatdan o'ting! /start")
-    await m.answer(f"💰 Balansingiz: <b>{user['coins']} coin</b>\n\n🆔 Kontent <b>ID kodini</b> yuboring:", parse_mode="HTML")
+
+    # Barcha kontentlar ro'yxatini chiqarish
+    async with db_pool.acquire() as conn:
+        all_items = await conn.fetch("SELECT * FROM content ORDER BY content_type, id DESC")
+
+    if not all_items:
+        return await m.answer("📭 Hozircha kontentlar mavjud emas!")
+
+    text = "🎟 <b>BARCHA KONTENTLAR</b>\n━━━━━━━━━━━━━━━━━━━━\n\n"
+    for item in all_items:
+        emoji = TYPE_EMOJI.get(item['content_type'], '🎬')
+        status_emoji = "✅" if item['status'] == 'Tugallangan' else "🔄"
+        if item['price'] > 0:
+            price_text = f"💎 {item['price']} coin"
+        else:
+            price_text = "🆓 Bepul"
+        text += f"{emoji} <b>{item['name']}</b> | {status_emoji} {item['status']}\n"
+        text += f"   {price_text} | 🆔 Kod: <code>{item['id']}</code>\n"
+        text += f"   ─────────────────\n"
+
+    text += "\n📌 Kontent <b>kodini</b> yuboring:"
+    await m.answer(text, parse_mode="HTML")
     await state.set_state(BotState.buying_content)
 
 @dp.message(BotState.buying_content)
@@ -815,30 +897,48 @@ async def process_buy(m: Message, state: FSMContext):
         return await m.answer("⚠️ Faqat kontent kodini raqamda yozing!")
     content = await get_content(int(m.text))
     if not content:
-        return await m.answer("❌ Bunday kodli kontent topilmadi!")
+        return await m.answer("❌ Bunday kodli kontent topilmadi!\n\n💡 Ro'yxatdan to'g'ri ID ni tanlang.")
     user = await get_user(m.from_user.id)
+    emoji = TYPE_EMOJI.get(content['content_type'], '🎬')
 
+    # Allaqachon sotib olingan yoki bepul
     if content['price'] == 0 or await user_has_content(m.from_user.id, content['id']):
         await state.clear()
         await show_content_detail(m.from_user.id, content['id'])
         return
 
+    # Coin yetarli emas
     if user['coins'] < content['price']:
         await state.clear()
         return await m.answer(
-            f"❌ <b>Coinlar yetarli emas!</b>\n\n💎 Narx: {content['price']} coin\n💰 Sizda: {user['coins']} coin",
+            f"❌ <b>Coinlar yetarli emas!</b>\n\n"
+            f"{emoji} <b>{content['name']}</b>\n"
+            f"💎 Narx: <b>{content['price']} coin</b>\n"
+            f"💰 Sizda: <b>{user['coins']} coin</b>\n\n"
+            f"💡 Do'st taklif qiling yoki kunlik bonus oling!",
             parse_mode="HTML"
         )
 
+    # Tasdiqlash tugmalari
     kb = InlineKeyboardBuilder()
-    kb.button(text=f"✅ Ha, {content['price']} coin to'layman", callback_data=f"confirm_buy_{content['id']}")
-    kb.button(text="❌ Bekor qilish", callback_data="cancel_buy")
+    kb.button(
+        text=f"✅ {content['price']} coin to'lab sotib olish",
+        callback_data=f"confirm_buy_{content['id']}"
+    )
+    kb.button(text="❌ Yo'q, shart emas", callback_data="cancel_buy")
     kb.adjust(1)
-    emoji = TYPE_EMOJI.get(content['content_type'], '🎬')
+
+    status_emoji = "✅" if content['status'] == 'Tugallangan' else "🔄"
     await m.answer(
-        f"{emoji} <b>{content['name']}</b> ({content['year']})\n\n"
+        f"{emoji} <b>{content['name']}</b>\n"
+        f"📅 Yil: {content['year'] or '-'}\n"
+        f"🎭 Janr: {content['genre'] or '-'}\n"
+        f"📌 Holat: {status_emoji} {content['status']}\n\n"
         f"📝 {content['description'] or 'Tavsif mavjud emas'}\n\n"
-        f"💎 Narx: <b>{content['price']} coin</b>\n💰 Sizda: <b>{user['coins']} coin</b>\n\nTasdiqlaysizmi?",
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"💎 Narx: <b>{content['price']} coin</b>\n"
+        f"💰 Sizda: <b>{user['coins']} coin</b>\n\n"
+        f"Sotib olasizmi?",
         reply_markup=kb.as_markup(), parse_mode="HTML"
     )
     await state.clear()
@@ -848,17 +948,34 @@ async def confirm_purchase(c: CallbackQuery):
     await c.answer()
     content_id = int(c.data.split("_")[2])
     content = await get_content(content_id)
+    user = await get_user(c.from_user.id)
+
+    if user['coins'] < content['price']:
+        return await c.message.edit_text(
+            f"❌ <b>Coinlar yetarli emas!</b>\n\n"
+            f"💎 Narx: <b>{content['price']} coin</b>\n"
+            f"💰 Sizda: <b>{user['coins']} coin</b>\n\n"
+            f"💡 Do'st taklif qiling yoki kunlik bonus oling!",
+            parse_mode="HTML"
+        )
+
     success = await buy_content(c.from_user.id, content_id, content['price'])
     if success:
-        await c.message.edit_text(f"✅ <b>{content['name']}</b> sotib olindi!", parse_mode="HTML")
-        await show_content_detail(c.from_user.id, content_id)
+        emoji = TYPE_EMOJI.get(content['content_type'], '🎬')
+        await c.message.edit_text(
+            f"✅ <b>Muvaffaqiyatli sotib olindi!</b>\n\n"
+            f"{emoji} <b>{content['name']}</b>\n"
+            f"💎 To'landi: <b>{content['price']} coin</b>",
+            parse_mode="HTML"
+        )
+        await show_content_detail(c.from_user.id, content_id, c.from_user.id)
     else:
-        await c.message.edit_text("❌ Xatolik. Qayta urinib ko'ring!")
+        await c.message.edit_text("❌ Xatolik yuz berdi. Qayta urinib ko'ring!")
 
 @dp.callback_query(F.data == "cancel_buy")
 async def cancel_purchase(c: CallbackQuery):
     await c.answer()
-    await c.message.edit_text("❌ Bekor qilindi.")
+    await c.message.edit_text("❌ <b>Bekor qilindi.</b>\n\nBoshqa kino yoki anime ko'rish uchun ro'yxatga qarang.", parse_mode="HTML")
 
 # ================= HISOBIM =================
 @dp.message(F.text == "💰 Hisobim")
@@ -871,12 +988,31 @@ async def my_account(m: Message):
     async with db_pool.acquire() as conn:
         purchases_count = await conn.fetchval("SELECT COUNT(*) FROM purchases WHERE user_id=$1", m.from_user.id)
         referrals_count = await conn.fetchval("SELECT COUNT(*) FROM users WHERE referrer_id=$1", m.from_user.id)
+    rank = get_coin_rank(user['coins'])
     await m.answer(
         f"👤 <b>Shaxsiy Kabinet</b>\n━━━━━━━━━━━━━━━━━━\n\n"
-        f"📛 Ism: <b>{user['name']}</b>\n📱 Tel: {user['phone'] or 'Kiritilmagan'}\n"
-        f"💰 Balans: <b>{user['coins']} coin</b>\n🎬 Sotib olingan: <b>{purchases_count}</b> ta\n"
-        f"👥 Taklif qilingan: <b>{referrals_count}</b> ta\n📅 Sana: <b>{user['joined_at']}</b>\n\n"
-        f"🔑 ID: <code>{m.from_user.id}</code>",
+        f"📛 Ism: <b>{user['name']}</b>\n"
+        f"🏆 Daraja: <b>{rank}</b>\n"
+        f"📱 Tel: {user['phone'] or 'Kiritilmagan'}\n"
+        f"💰 Balans: <b>{user['coins']} coin</b>\n"
+        f"🎬 Sotib olingan: <b>{purchases_count}</b> ta\n"
+        f"👥 Taklif qilingan: <b>{referrals_count}</b> ta\n"
+        f"📅 Sana: <b>{user['joined_at']}</b>\n\n"
+        f"🔑 ID: <code>{m.from_user.id}</code>\n\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"📊 <b>Daraja tizimi:</b>\n"
+        f"💀 0 — Tilanchivoy\n"
+        f"🪨 1-50 — Kambag'al\n"
+        f"🌾 51-150 — Oddiy\n"
+        f"🥉 151-300 — O'rtahol\n"
+        f"🥈 301-500 — Munosib\n"
+        f"🥇 501-1000 — Badavlat\n"
+        f"💰 1001-2000 — Boy\n"
+        f"💎 2001-5000 — Millioner\n"
+        f"👑 5001-10000 — Magnit\n"
+        f"🔱 10001-50000 — Oligarx\n"
+        f"🌟 50001-100000 — VIP\n"
+        f"🚀 100000+ — SUPER VIP",
         parse_mode="HTML"
     )
 
@@ -922,7 +1058,11 @@ async def write_to_admin(m: Message, state: FSMContext):
         return await m.answer("❌ Avval ro'yxatdan o'ting! /start")
     await state.set_state(BotState.in_active_chat)
     await state.update_data(chat_with=ADMIN_ID, is_user_side=True)
-    await m.answer("✍️ <b>Adminga xabar yozing:</b>\n\nTugatish: /stop", parse_mode="HTML", reply_markup=ReplyKeyboardRemove())
+    # Foydalanuvchiga hech qanday tugma va /stop ko'rsatilmaydi
+    await m.answer(
+        "✍️ <b>Adminga xabar yozing:</b>\n\nAdmin javob berguncha kuting...",
+        parse_mode="HTML", reply_markup=ReplyKeyboardRemove()
+    )
     try:
         await bot.send_message(
             ADMIN_ID,
@@ -937,25 +1077,34 @@ async def write_to_admin(m: Message, state: FSMContext):
 # ================= AKTIV CHAT =================
 @dp.message(BotState.in_active_chat)
 async def active_chat(m: Message, state: FSMContext):
-    if m.text and m.text.lower() == "/stop":
-        data = await state.get_data()
-        partner = data.get("chat_with")
-        is_user_side = data.get("is_user_side", True)
+    # Bloklangan bo'lsa chat holatida ham xabar ko'rsatamiz
+    user = await get_user(m.from_user.id)
+    if user and user['is_banned']:
         await state.clear()
-        await m.answer("📴 Suhbat yakunlandi.", reply_markup=get_main_kb(m.from_user.id))
-        if partner:
-            try:
-                if is_user_side:
-                    await bot.send_message(partner, f"📴 Foydalanuvchi ({m.from_user.id}) suhbatni tugatdi.", reply_markup=get_admin_kb())
-                else:
-                    await bot.send_message(partner, "📴 Admin suhbatni tugatdi.", reply_markup=get_main_kb(partner))
-            except:
-                pass
-        return
-
-    data = await state.get_data()
+        return await m.answer("🚫 Siz botdan bloklangansiz.")
     partner = data.get("chat_with")
     is_user_side = data.get("is_user_side", True)
+
+    # /stop faqat admin uchun ishlaydi
+    if m.text and m.text.lower() == "/stop":
+        if m.from_user.id != ADMIN_ID:
+            # Foydalanuvchi /stop yozsa — e'tibor bermaymiz, xabar sifatida yuboramiz
+            pass
+        else:
+            # Faqat admin tugatishi mumkin
+            await state.clear()
+            await m.answer("📴 Suhbat yakunlandi.", reply_markup=get_admin_kb())
+            if partner:
+                try:
+                    await bot.send_message(
+                        partner,
+                        "📴 Admin suhbatni yakunladi.",
+                        reply_markup=get_main_kb(partner)
+                    )
+                except:
+                    pass
+            return
+
     if not partner:
         return
 
@@ -972,10 +1121,12 @@ async def active_chat(m: Message, state: FSMContext):
             await bot.send_video(partner, m.video.file_id, caption=f"{prefix}{m.caption or ''}", parse_mode="HTML")
         elif m.document:
             await bot.send_document(partner, m.document.file_id, caption=f"{prefix}{m.caption or ''}", parse_mode="HTML")
+
+        # Faqat adminga tugatish tugmasi ko'rinadi
         if not is_user_side:
-            await m.answer("✅ Yuborildi! Tugatish: /stop", reply_markup=get_admin_end_chat_kb())
+            await m.answer("✅ Yuborildi!", reply_markup=get_admin_end_chat_kb())
         else:
-            await m.answer("✅ Yuborildi! Tugatish: /stop")
+            await m.answer("✅ Yuborildi!")
     except Exception as e:
         await m.answer(f"❌ Yuborilmadi: {e}")
 
@@ -1161,9 +1312,10 @@ async def save_content(m: Message, state: FSMContext):
         f"📅 Yil: {data.get('c_year', '-')}\n"
         f"📌 Holat: {data.get('c_status', 'Tugallanmagan')}\n"
         f"💰 Narx: {m.text} coin\n\n"
-        f"📺 Endi qismlarni qo'shishingiz mumkin!",
+        f"📢 Foydalanuvchilarga yangilik xabari yuborilmoqda...",
         parse_mode="HTML", reply_markup=get_admin_kb()
     )
+    asyncio.create_task(broadcast_new_content(new_id))
 
 # ==========================================
 # KONTENT O'CHIRISH
@@ -1478,7 +1630,59 @@ async def sub_get_title(m: Message, state: FSMContext):
         await state.clear()
         await m.answer(f"❌ Xatolik: {e}")
 
-async def broadcast_new_sub():
+async def broadcast_new_content(content_id: int):
+    """Yangi kontent qo'shilganda barcha foydalanuvchilarga xabar yuboradi."""
+    try:
+        content = await get_content(content_id)
+        if not content:
+            return
+        all_users = await get_all_users()
+        emoji = TYPE_EMOJI.get(content['content_type'], '🎬')
+        type_name = TYPE_NAME.get(content['content_type'], 'Kontent')
+        status_emoji = "✅" if content['status'] == 'Tugallangan' else "🔄"
+
+        if content['price'] > 0:
+            price_text = f"💎 {content['price']} coin"
+        else:
+            price_text = "🆓 Bepul"
+
+        text = (
+            f"🆕✨ <b>YANGI {type_name.upper()} QO'SHILDI!</b> ✨🆕\n\n"
+            f"{emoji} <b>{content['name']}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"📅 Yil: {content['year'] or '-'}\n"
+            f"🎭 Janr: {content['genre'] or '-'}\n"
+            f"📺 Sifat: {content['quality'] or '-'}\n"
+            f"🎙 Ovoz: {content['dubbing'] or '-'}\n"
+            f"📌 Holat: {status_emoji} {content['status']}\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"{price_text}\n"
+            f"🆔 Kod: <code>{content['id']}</code>\n\n"
+            f"🎬 Ko'rish uchun — <b>🎟 Kino Sotib Olish</b> tugmasini bosing!"
+        )
+
+        count = 0
+        for u in all_users:
+            if u['user_id'] == ADMIN_ID:
+                continue
+            try:
+                if content['poster_file_id']:
+                    await bot.send_photo(u['user_id'], content['poster_file_id'],
+                                         caption=text, parse_mode="HTML")
+                else:
+                    await bot.send_message(u['user_id'], text, parse_mode="HTML")
+                count += 1
+                await asyncio.sleep(0.05)
+            except:
+                pass
+
+        logger.info(f"Yangi kontent xabari {count} ta foydalanuvchiga yuborildi")
+        try:
+            await bot.send_message(ADMIN_ID, f"✅ Yangilik xabari <b>{count}</b> ta foydalanuvchiga yuborildi!", parse_mode="HTML")
+        except:
+            pass
+    except Exception as e:
+        logger.error(f"broadcast_new_content xato: {e}")
     try:
         all_users = await get_all_users()
         for u in all_users:
@@ -1757,6 +1961,7 @@ async def chat_reject(c: CallbackQuery):
 
 @dp.callback_query(F.data == "end_chat")
 async def end_chat_callback(c: CallbackQuery, state: FSMContext):
+    # Faqat admin tugatishi mumkin
     if c.from_user.id != ADMIN_ID:
         return await c.answer("❌ Bu tugma faqat admin uchun!", show_alert=True)
     await c.answer()
@@ -1770,7 +1975,11 @@ async def end_chat_callback(c: CallbackQuery, state: FSMContext):
     await bot.send_message(c.from_user.id, "📴 Suhbat yakunlandi.", reply_markup=get_admin_kb())
     if partner:
         try:
-            await bot.send_message(partner, "📴 Admin suhbatni tugatdi.", reply_markup=get_main_kb(partner))
+            await bot.send_message(
+                partner,
+                "📴 Admin suhbatni yakunladi.",
+                reply_markup=get_main_kb(partner)
+            )
         except:
             pass
 
