@@ -84,11 +84,16 @@ async def init_db():
                 dubbing TEXT,
                 description TEXT,
                 poster_file_id TEXT,
+                link TEXT,
                 status TEXT DEFAULT 'Tugallanmagan',
                 price INTEGER DEFAULT 0,
                 added_at TIMESTAMP DEFAULT NOW()
             )
         """)
+        try:
+            await conn.execute("ALTER TABLE content ADD COLUMN IF NOT EXISTS link TEXT")
+        except:
+            pass
         # Qismlar (episodes)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS episodes (
@@ -171,12 +176,12 @@ async def get_content_by_type(content_type: str):
     async with db_pool.acquire() as conn:
         return await conn.fetch("SELECT * FROM content WHERE content_type=$1 ORDER BY id DESC", content_type)
 
-async def add_content(content_type, name, year, genre, quality, dubbing, description, poster_file_id, status, price):
+async def add_content(content_type, name, year, genre, quality, dubbing, description, poster_file_id, link, status, price):
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow("""
-            INSERT INTO content (content_type, name, year, genre, quality, dubbing, description, poster_file_id, status, price)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id
-        """, content_type, name, year, genre, quality, dubbing, description, poster_file_id, status, price)
+            INSERT INTO content (content_type, name, year, genre, quality, dubbing, description, poster_file_id, link, status, price)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id
+        """, content_type, name, year, genre, quality, dubbing, description, poster_file_id, link, status, price)
         return row['id']
 
 async def delete_content(content_id: int):
@@ -433,6 +438,7 @@ class BotState(StatesGroup):
     adding_c_dubbing = State()
     adding_c_desc = State()
     adding_c_poster = State()
+    adding_c_link = State()
     adding_c_status = State()
     adding_c_price = State()
     # Qism qo'shish
@@ -546,9 +552,8 @@ def format_content_info(c: dict, episodes: list) -> str:
     else:
         text += f"💎 <b>Narx:</b> Bepul\n"
     text += f"🆔 <b>ID:</b> {c['id']}\n"
-
-    bot_username_placeholder = "@botusername"
-    text += f"🔗 <b>Link:</b> <code>https://t.me/{bot_username_placeholder}?start={c['id']}</code>"
+    if c.get('link'):
+        text += f"🔗 <b>Link:</b> <a href='{c['link']}'>{c['link']}</a>"
     return text
 
 # ================= START =================
@@ -782,7 +787,6 @@ async def show_content_list(m: Message, content_type: str):
     text = f"{emoji} <b>{name.upper()}LAR RO'YXATI</b>\n━━━━━━━━━━━━━━━━━━━━\n\n"
     for item in items:
         status_emoji = "✅" if item['status'] == 'Tugallangan' else "🔄"
-        ep_count = await db_pool.acquire()
         async with db_pool.acquire() as conn:
             ep_count = await conn.fetchval("SELECT COUNT(*) FROM episodes WHERE content_id=$1", item['id'])
         price_text = f"{item['price']} coin" if item['price'] > 0 else "Bepul"
@@ -1099,11 +1103,23 @@ async def set_c_desc(m: Message, state: FSMContext):
 @dp.message(BotState.adding_c_poster, F.photo)
 async def set_c_poster_photo(m: Message, state: FSMContext):
     await state.update_data(c_poster=m.photo[-1].file_id)
-    await ask_c_status(m, state)
+    await ask_c_link(m, state)
 
 @dp.message(BotState.adding_c_poster, F.text)
 async def set_c_poster_skip(m: Message, state: FSMContext):
     await state.update_data(c_poster=None)
+    await ask_c_link(m, state)
+
+async def ask_c_link(m: Message, state: FSMContext):
+    await m.answer("🔗 <b>Kino/Anime/Drama linkini kiriting:</b>\n(masalan: https://t.me/anireply?start=124)\n\nYo'q bo'lsa /skip", parse_mode="HTML")
+    await state.set_state(BotState.adding_c_link)
+
+@dp.message(BotState.adding_c_link)
+async def set_c_link(m: Message, state: FSMContext):
+    if m.text == '/skip':
+        await state.update_data(c_link=None)
+    else:
+        await state.update_data(c_link=m.text.strip())
     await ask_c_status(m, state)
 
 async def ask_c_status(m: Message, state: FSMContext):
@@ -1132,8 +1148,8 @@ async def save_content(m: Message, state: FSMContext):
     new_id = await add_content(
         content_type, data['c_name'], data.get('c_year'), data.get('c_genre'),
         data.get('c_quality', '720p, 1080p'), data.get('c_dubbing'),
-        data.get('c_desc'), data.get('c_poster'), data.get('c_status', 'Tugallanmagan'),
-        int(m.text)
+        data.get('c_desc'), data.get('c_poster'), data.get('c_link'),
+        data.get('c_status', 'Tugallanmagan'), int(m.text)
     )
     await state.clear()
     emoji = TYPE_EMOJI[content_type]
