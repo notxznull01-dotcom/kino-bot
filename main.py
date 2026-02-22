@@ -639,35 +639,38 @@ async def show_content_detail(chat_id: int, content_id: int, user_id: int = None
     episodes = await get_episodes(content_id)
     text = format_content_info(c, episodes)
 
-    kb = InlineKeyboardBuilder()
-
     is_free = c['price'] == 0
     already_bought = await user_has_content(uid, content_id)
+    can_watch = is_free or already_bought
 
-    if episodes:
-        if is_free or already_bought:
-            # Tomosha qilish tugmasi + qism raqamlari
-            nums = sorted([ep['episode_number'] for ep in episodes])
-            row = []
-            for n in nums:
-                row.append(InlineKeyboardButton(text=str(n), callback_data=f"ep_{content_id}_{n}"))
+    kb = InlineKeyboardBuilder()
+
+    if can_watch:
+        # Tomosha qilish imkoni bor
+        if episodes:
             kb.row(InlineKeyboardButton(text="🎬 Tomosha qilish", callback_data=f"watch_{content_id}"))
+            nums = sorted([ep['episode_number'] for ep in episodes])
+            row = [InlineKeyboardButton(text=str(n), callback_data=f"ep_{content_id}_{n}") for n in nums]
             for i in range(0, len(row), 6):
                 kb.row(*row[i:i+6])
-        else:
-            # Sotib olish tugmasi
-            kb.button(text=f"🛒 {c['price']} coin to'lab sotib olish", callback_data=f"confirm_buy_{content_id}")
-            kb.button(text="❌ Yo'q, shart emas", callback_data="cancel_buy")
-            kb.adjust(1)
-    elif c.get('link'):
-        if is_free or already_bought:
+        elif c.get('link'):
             kb.button(text="🎬 Tomosha qilish", url=c['link'])
-        else:
-            kb.button(text=f"🛒 {c['price']} coin to'lab sotib olish", callback_data=f"confirm_buy_{content_id}")
-            kb.button(text="❌ Yo'q, shart emas", callback_data="cancel_buy")
-            kb.adjust(1)
+        # Agar episodes ham, link ham yo'q — faqat ma'lumot ko'rsatiladi
+    else:
+        # Sotib olish kerak
+        kb.button(text=f"🛒 {c['price']} coin to'lab sotib olish", callback_data=f"confirm_buy_{content_id}")
+        kb.button(text="❌ Yo'q, shart emas", callback_data="cancel_buy")
+        kb.adjust(1)
 
-    markup = kb.as_markup() if kb.buttons else None
+    # Tugmalar borligini to'g'ri tekshirish
+    has_buttons = len(kb._markup_rows) > 0 if hasattr(kb, '_markup_rows') else True
+    try:
+        markup = kb.as_markup()
+        # Bo'sh inline_keyboard bo'lsa None qilish
+        if not any(markup.inline_keyboard):
+            markup = None
+    except:
+        markup = None
 
     if c['poster_file_id']:
         try:
@@ -898,18 +901,20 @@ async def process_buy(m: Message, state: FSMContext):
     content = await get_content(int(m.text))
     if not content:
         return await m.answer("❌ Bunday kodli kontent topilmadi!\n\n💡 Ro'yxatdan to'g'ri ID ni tanlang.")
+
+    await state.clear()
     user = await get_user(m.from_user.id)
     emoji = TYPE_EMOJI.get(content['content_type'], '🎬')
+    is_free = content['price'] == 0
+    already_bought = await user_has_content(m.from_user.id, content['id'])
 
-    # Allaqachon sotib olingan yoki bepul
-    if content['price'] == 0 or await user_has_content(m.from_user.id, content['id']):
-        await state.clear()
-        await show_content_detail(m.from_user.id, content['id'])
+    # Bepul yoki allaqachon sotib olingan
+    if is_free or already_bought:
+        await show_content_detail(m.from_user.id, content['id'], m.from_user.id)
         return
 
     # Coin yetarli emas
     if user['coins'] < content['price']:
-        await state.clear()
         return await m.answer(
             f"❌ <b>Coinlar yetarli emas!</b>\n\n"
             f"{emoji} <b>{content['name']}</b>\n"
@@ -919,29 +924,39 @@ async def process_buy(m: Message, state: FSMContext):
             parse_mode="HTML"
         )
 
-    # Tasdiqlash tugmalari
+    # Sotib olish oynasi
+    status_emoji = "✅" if content['status'] == 'Tugallangan' else "🔄"
     kb = InlineKeyboardBuilder()
-    kb.button(
-        text=f"✅ {content['price']} coin to'lab sotib olish",
-        callback_data=f"confirm_buy_{content['id']}"
-    )
+    kb.button(text=f"🛒 {content['price']} coin to'lab sotib olish", callback_data=f"confirm_buy_{content['id']}")
     kb.button(text="❌ Yo'q, shart emas", callback_data="cancel_buy")
     kb.adjust(1)
 
-    status_emoji = "✅" if content['status'] == 'Tugallangan' else "🔄"
-    await m.answer(
+    text = (
         f"{emoji} <b>{content['name']}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📅 Yil: {content['year'] or '-'}\n"
         f"🎭 Janr: {content['genre'] or '-'}\n"
-        f"📌 Holat: {status_emoji} {content['status']}\n\n"
-        f"📝 {content['description'] or 'Tavsif mavjud emas'}\n\n"
+        f"📺 Sifat: {content['quality'] or '-'}\n"
+        f"🎙 Ovoz: {content['dubbing'] or '-'}\n"
+        f"📌 Holat: {status_emoji} {content['status']}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
+    )
+    if content['description']:
+        text += f"📝 {content['description']}\n\n"
+    text += (
         f"💎 Narx: <b>{content['price']} coin</b>\n"
         f"💰 Sizda: <b>{user['coins']} coin</b>\n\n"
-        f"Sotib olasizmi?",
-        reply_markup=kb.as_markup(), parse_mode="HTML"
+        f"Sotib olasizmi?"
     )
-    await state.clear()
+
+    if content['poster_file_id']:
+        try:
+            await m.answer_photo(content['poster_file_id'], caption=text,
+                                  reply_markup=kb.as_markup(), parse_mode="HTML")
+        except:
+            await m.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
+    else:
+        await m.answer(text, reply_markup=kb.as_markup(), parse_mode="HTML")
 
 @dp.callback_query(F.data.startswith("confirm_buy_"))
 async def confirm_purchase(c: CallbackQuery):
