@@ -1,2612 +1,1554 @@
-#!/usr/bin/env python3
-# ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║         TELEGRAM GROK AI BOT — PYDROID 3 VERSIYA                          ║
-# ║     Grok AI | Premium | Rasm | Quiz | Admin Panel | Xavfsizlik             ║
-# ╚══════════════════════════════════════════════════════════════════════════════╝
-#
-#  PYDROID 3 DA O'RNATISH:
-#    pip install python-telegram-bot==20.7
-#    pip install openai
-#    pip install httpx
-#
-#  ISHGA TUSHIRISH:
-#    python main_bot.py
-#
-# ──────────────────────────────────────────────────────────────────────────────
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  🔑  BARCHA TOKENLAR VA API KALITLARI — SHU YERGA KIRITING
-# ══════════════════════════════════════════════════════════════════════════════
-
-BOT_TOKEN      = "8628602957:AAEIg78I1ikg7hvydXiQrLWpMVS5Iebg-r0"
-# Misol: BOT_TOKEN = "7123456789:AAFxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-
-ADMIN_IDS = [
-    7490516744,   # ← O'z admin ID ingizni kiriting
-]
-
-ADMIN_PASSWORD    = "456"
-GROK_API_KEY      = "xai-FexnebMjXLPV8wh0RD4WdxRXactsvP47hxodhFTe0CBtPWl4mN0rVrGtHkWg7fPk9KE27ZocNraYIU1b"
-# Misol: GROK_API_KEY = "xai-xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-
-# ──────────────────────────────────────────────────────────────────────────────
-#  ⚙️  QO'SHIMCHA SOZLAMALAR
-# ──────────────────────────────────────────────────────────────────────────────
-
-GROK_MODEL          = "grok-3-latest"
-MAX_HISTORY         = 20
-MAX_TOKENS          = 2000
-TEMPERATURE         = 0.7
-DB_FILE             = "bot_data.db"
-LOG_FILE            = "bot.log"
-FREE_IMAGE_LIMIT    = 10
-PREMIUM_IMAGE_LIMIT = 50
-PREMIUM_PRICE_UZS   = 30000
-PREMIUM_PRICE_USD   = 3
-
-# ──────────────────────────────────────────────────────────────────────────────
-#  IMPORTLAR
-# ──────────────────────────────────────────────────────────────────────────────
-
-import os
-import sys
-import logging
-import asyncio
-import sqlite3
-import json
-import time
-import random
-import traceback
-from datetime import datetime, timedelta
-from typing import Optional, List, Dict, Any
-
-# Pydroid 3 uchun event loop muammosini hal qilish
-import asyncio
-try:
-    import asyncio.selector_events
-except Exception:
-    pass
-
-_missing = []
-try:
-    from telegram import (
-        Update, InlineKeyboardButton, InlineKeyboardMarkup,
-        BotCommand
-    )
-    from telegram.ext import (
-        Application, CommandHandler, MessageHandler,
-        CallbackQueryHandler, filters, ContextTypes
-    )
-    from telegram.constants import ParseMode, ChatAction
-    from telegram.error import NetworkError, TimedOut, TelegramError
-except ImportError:
-    _missing.append("python-telegram-bot==20.7")
-
-try:
-    from openai import AsyncOpenAI
-    import openai
-except ImportError:
-    _missing.append("openai")
-
-if _missing:
-    print("❌ Quyidagi kutubxonalar o'rnatilmagan:")
-    for lib in _missing:
-        print(f"   pip install {lib}")
-    sys.exit(1)
-
-# ──────────────────────────────────────────────────────────────────────────────
-#  LOGGING — Pydroid 3 uchun soddalashtirilgan
-# ──────────────────────────────────────────────────────────────────────────────
-
-handlers = [logging.StreamHandler(sys.stdout)]
-try:
-    handlers.append(logging.FileHandler(LOG_FILE, encoding="utf-8", mode="a"))
-except Exception:
-    pass
-
-logging.basicConfig(
-    format="%(asctime)s | %(levelname)-8s | %(message)s",
-    level=logging.INFO,
-    handlers=handlers
-)
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("httpcore").setLevel(logging.WARNING)
-logging.getLogger("openai").setLevel(logging.WARNING)
-logging.getLogger("telegram").setLevel(logging.WARNING)
-logger = logging.getLogger("GrokBot")
-
-# ──────────────────────────────────────────────────────────────────────────────
-#  KONSTANTALAR
-# ──────────────────────────────────────────────────────────────────────────────
-
-SYSTEM_PROMPT = (
-    "Siz foydali, do'stona va aqlli AI yordamchisiz — Grok (xAI). "
-    "Foydalanuvchiga aniq va qisqacha javob bering. "
-    "Agar savol o'zbek tilida bo'lsa, o'zbek tilida javob bering. "
-    "Agar ingliz tilida bo'lsa, ingliz tilida javob bering. "
-    "Har doim mehribon va professional bo'ling."
+import asyncio, os, logging, sys, json, re, httpx
+from datetime import datetime, date, timedelta
+from threading import Thread
+from flask import Flask
+import asyncpg
+from aiogram import Bot, Dispatcher, F
+from aiogram.filters import CommandStart
+from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import (
+    ReplyKeyboardRemove, CallbackQuery, Message, InlineKeyboardMarkup
 )
 
-QUIZ_TOPICS = [
-    "Tarix", "Geografiya", "Fan va texnologiya", "Sport",
-    "Musiqa", "Kino", "Matematika", "Biologiya",
-    "Fizika", "Adabiyot", "Oziq-ovqat", "Hayvonot"
-]
+# ═══════════════════════════════════════════════════
+#  KONFIGURATSIYA
+# ═══════════════════════════════════════════════════
+TOKEN        = os.environ.get("BOT_TOKEN",    "8366692220:AAHKoIz6A__Ll1V5yvcjcjWVaFr5Xcf9HQQ")
+ADMIN_ID     = int(os.environ.get("ADMIN_ID", "7492227388"))
+ADMIN_PASS   = os.environ.get("ADMIN_PASS",   "456")
+DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://kino_bot_db_duf5_user:MNiazQVid4iljB2dvN7LeJ8XfYFdnaJQ@dpg-d672bp8gjchc738fpdm0-a/kino_bot_db_duf5")
+GEMINI_KEY   = os.environ.get("GEMINI_API_KEY", "AIzaSyBAUbeVvAboH4jOtE6jBPzIgiJg9zssjhg")
 
-TRANSLATE_LANGS = [
-    ("O'zbek",   "uzbek"),
-    ("Rus",      "russian"),
-    ("Ingliz",   "english"),
-    ("Nemis",    "german"),
-    ("Fransuz",  "french"),
-    ("Koreys",   "korean"),
-    ("Xitoy",    "chinese"),
-    ("Arab",     "arabic"),
-]
+AI_FREE_LIMIT    = 10
+AI_PREMIUM_LIMIT = 50
+AI_VIP_LIMIT     = 999
 
-# ══════════════════════════════════════════════════════════════════════════════
+VIP_PLANS = {
+    "premium_day":   {"name": "⭐ Premium 1 kun",   "days": 1,   "coins": 50,   "label": "premium"},
+    "premium_week":  {"name": "⭐ Premium 1 hafta",  "days": 7,   "coins": 200,  "label": "premium"},
+    "premium_month": {"name": "⭐ Premium 1 oy",     "days": 30,  "coins": 500,  "label": "premium"},
+    "premium_year":  {"name": "⭐ Premium 1 yil",    "days": 365, "coins": 3000, "label": "premium"},
+    "vip_day":       {"name": "👑 VIP 1 kun",        "days": 1,   "coins": 100,  "label": "vip"},
+    "vip_week":      {"name": "👑 VIP 1 hafta",      "days": 7,   "coins": 400,  "label": "vip"},
+    "vip_month":     {"name": "👑 VIP 1 oy",         "days": 30,  "coins": 1000, "label": "vip"},
+    "vip_year":      {"name": "👑 VIP 1 yil",        "days": 365, "coins": 6000, "label": "vip"},
+}
+
+# ═══════════════════════════════════════════════════
+#  FLASK
+# ═══════════════════════════════════════════════════
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "✅ CineBot 2026 ishlayapti!"
+
+def run_flask():
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
+
+def keep_alive():
+    t = Thread(target=run_flask)
+    t.daemon = True
+    t.start()
+
+# ═══════════════════════════════════════════════════
+#  LOGGING
+# ═══════════════════════════════════════════════════
+logging.basicConfig(level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)])
+logger = logging.getLogger(__name__)
+
+bot = Bot(token=TOKEN)
+dp  = Dispatcher()
+
+# ═══════════════════════════════════════════════════
 #  DATABASE
-# ══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════
+db_pool = None
 
-def get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    return conn
+async def init_db():
+    global db_pool
+    db_pool = await asyncpg.create_pool(DATABASE_URL)
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id      BIGINT PRIMARY KEY,
+                name         TEXT NOT NULL,
+                phone        TEXT,
+                coins        INTEGER   DEFAULT 100,
+                referrer_id  BIGINT    DEFAULT NULL,
+                joined_at    DATE      DEFAULT CURRENT_DATE,
+                last_bonus   DATE      DEFAULT NULL,
+                is_banned    BOOLEAN   DEFAULT FALSE,
+                vip_type     TEXT      DEFAULT NULL,
+                vip_expires  TIMESTAMP DEFAULT NULL,
+                ai_used_today INTEGER  DEFAULT 0,
+                ai_last_date DATE      DEFAULT NULL
+            )
+        """)
+        for col, defn in [
+            ("vip_type",      "TEXT DEFAULT NULL"),
+            ("vip_expires",   "TIMESTAMP DEFAULT NULL"),
+            ("ai_used_today", "INTEGER DEFAULT 0"),
+            ("ai_last_date",  "DATE DEFAULT NULL"),
+        ]:
+            try:
+                await conn.execute(f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col} {defn}")
+            except:
+                pass
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS movies (
+                id          SERIAL PRIMARY KEY,
+                name        TEXT NOT NULL,
+                year        TEXT,
+                description TEXT,
+                file_id     TEXT,
+                price       INTEGER   DEFAULT 0,
+                genre       TEXT      DEFAULT NULL,
+                added_at    TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        try:
+            await conn.execute("ALTER TABLE movies ADD COLUMN IF NOT EXISTS genre TEXT DEFAULT NULL")
+        except:
+            pass
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS purchases (
+                id        SERIAL PRIMARY KEY,
+                user_id   BIGINT,
+                movie_id  INTEGER,
+                bought_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS required_channels (
+                id       SERIAL PRIMARY KEY,
+                link     TEXT NOT NULL,
+                title    TEXT DEFAULT 'Kanal',
+                added_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_sub_status (
+                user_id         BIGINT,
+                channel_id      INTEGER,
+                is_subscribed   BOOLEAN   DEFAULT FALSE,
+                last_checked    TIMESTAMP DEFAULT NOW(),
+                subscribed_at   TIMESTAMP,
+                unsubscribed_at TIMESTAMP,
+                PRIMARY KEY (user_id, channel_id)
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS sub_logs (
+                id            SERIAL PRIMARY KEY,
+                user_id       BIGINT,
+                user_name     TEXT,
+                channel_id    INTEGER,
+                channel_title TEXT,
+                channel_link  TEXT,
+                event         TEXT,
+                event_time    TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS ai_sessions (
+                user_id    BIGINT PRIMARY KEY,
+                context    TEXT DEFAULT '[]',
+                updated_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS vip_history (
+                id         SERIAL PRIMARY KEY,
+                user_id    BIGINT,
+                vip_type   TEXT,
+                given_by   TEXT,
+                started_at TIMESTAMP DEFAULT NOW(),
+                expires_at TIMESTAMP,
+                coins_paid INTEGER DEFAULT 0
+            )
+        """)
+    logger.info("✅ CineBot 2026 DB tayyor!")
 
+# ═══════════════════════════════════════════════════
+#  DB FUNKSIYALAR
+# ═══════════════════════════════════════════════════
+async def get_user(uid):
+    async with db_pool.acquire() as conn:
+        return await conn.fetchrow("SELECT * FROM users WHERE user_id=$1", uid)
 
-def init_database():
-    conn = get_db()
-    cur  = conn.cursor()
+async def create_user(uid, name, phone=None, referrer_id=None):
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO users (user_id,name,phone,coins,referrer_id)
+            VALUES ($1,$2,$3,100,$4) ON CONFLICT (user_id) DO NOTHING
+        """, uid, name, phone, referrer_id)
+        if referrer_id:
+            await conn.execute("UPDATE users SET coins=coins+50 WHERE user_id=$1", referrer_id)
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id          INTEGER PRIMARY KEY,
-            username         TEXT    DEFAULT '',
-            full_name        TEXT    DEFAULT '',
-            is_banned        INTEGER DEFAULT 0,
-            ban_reason       TEXT    DEFAULT '',
-            is_premium       INTEGER DEFAULT 0,
-            premium_expires  TEXT    DEFAULT '',
-            images_used      INTEGER DEFAULT 0,
-            total_msgs       INTEGER DEFAULT 0,
-            joined_at        TEXT    DEFAULT (datetime('now','localtime')),
-            last_active      TEXT    DEFAULT (datetime('now','localtime')),
-            note             TEXT    DEFAULT '',
-            quiz_score       INTEGER DEFAULT 0,
-            quiz_total       INTEGER DEFAULT 0
-        )
-    """)
+async def get_all_users():
+    async with db_pool.acquire() as conn:
+        return await conn.fetch("SELECT user_id FROM users WHERE is_banned=FALSE")
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS conversations (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id    INTEGER NOT NULL,
-            role       TEXT    NOT NULL,
-            content    TEXT    NOT NULL,
-            created_at TEXT    DEFAULT (datetime('now','localtime'))
-        )
-    """)
+async def get_movie(mid):
+    async with db_pool.acquire() as conn:
+        return await conn.fetchrow("SELECT * FROM movies WHERE id=$1", mid)
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS admin_logs (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            admin_id   INTEGER NOT NULL,
-            admin_name TEXT    DEFAULT '',
-            action     TEXT    NOT NULL,
-            target_id  INTEGER DEFAULT 0,
-            details    TEXT    DEFAULT '',
-            created_at TEXT    DEFAULT (datetime('now','localtime'))
-        )
-    """)
+async def get_all_movies():
+    async with db_pool.acquire() as conn:
+        return await conn.fetch("SELECT * FROM movies ORDER BY id DESC")
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS settings (
-            key        TEXT PRIMARY KEY,
-            value      TEXT NOT NULL,
-            updated_at TEXT DEFAULT (datetime('now','localtime'))
-        )
-    """)
+async def add_movie(name, year, desc, file_id, price, genre=None):
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO movies (name,year,description,file_id,price,genre)
+            VALUES ($1,$2,$3,$4,$5,$6) RETURNING id
+        """, name, year, desc, file_id, price, genre)
+        return row['id']
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS daily_stats (
-            date             TEXT PRIMARY KEY,
-            new_users        INTEGER DEFAULT 0,
-            total_msgs       INTEGER DEFAULT 0,
-            grok_msgs        INTEGER DEFAULT 0,
-            images_made      INTEGER DEFAULT 0,
-            premium_requests INTEGER DEFAULT 0
-        )
-    """)
+async def user_has_movie(uid, mid):
+    async with db_pool.acquire() as conn:
+        r = await conn.fetchrow("SELECT id FROM purchases WHERE user_id=$1 AND movie_id=$2", uid, mid)
+        return r is not None
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS images (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id    INTEGER NOT NULL,
-            prompt     TEXT    NOT NULL,
-            created_at TEXT    DEFAULT (datetime('now','localtime'))
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS premium_requests (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id    INTEGER NOT NULL,
-            status     TEXT    DEFAULT 'pending',
-            message    TEXT    DEFAULT '',
-            created_at TEXT    DEFAULT (datetime('now','localtime'))
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS blocked_words (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            word       TEXT    NOT NULL UNIQUE,
-            added_by   INTEGER DEFAULT 0,
-            created_at TEXT    DEFAULT (datetime('now','localtime'))
-        )
-    """)
-
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_conv_user  ON conversations(user_id)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_logs_admin ON admin_logs(admin_id)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_users_prem ON users(is_premium)")
-
-    defaults = [
-        ("bot_enabled",       "1"),
-        ("image_enabled",     "1"),
-        ("maintenance_msg",   "Bot hozir texnik ishlar uchun to'xtatilgan. Tez orada qaytamiz!"),
-        ("welcome_msg",       "Xush kelibsiz!\n\nGrok AI bilan suhbatlashishingiz mumkin!\n\nNima qilmoqchisiz?"),
-        ("admin_password",    ADMIN_PASSWORD),
-        ("grok_model",        GROK_MODEL),
-        ("max_tokens",        str(MAX_TOKENS)),
-        ("temperature",       str(TEMPERATURE)),
-        ("premium_price_uzs", str(PREMIUM_PRICE_UZS)),
-        ("premium_price_usd", str(PREMIUM_PRICE_USD)),
-        ("premium_payment_info", "To'lov ma'lumotlari:\n\nKarta: 8600 xxxx xxxx xxxx\nEgasi: Admin\n\nTo'lovdan so'ng chekni adminga yuboring."),
-        ("rate_limit",        "30"),
-    ]
-    for key, val in defaults:
-        cur.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?,?)", (key, val))
-
-    conn.commit()
-    conn.close()
-    logger.info("Database ishga tushdi")
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-#  DB FUNKSIYALARI
-# ──────────────────────────────────────────────────────────────────────────────
-
-def db_get(key: str, default: str = "") -> str:
-    try:
-        conn = get_db()
-        row  = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
-        conn.close()
-        return row["value"] if row else default
-    except Exception as e:
-        logger.error(f"db_get error: {e}")
-        return default
-
-
-def db_set(key: str, value: str) -> bool:
-    try:
-        conn = get_db()
-        conn.execute(
-            "INSERT OR REPLACE INTO settings (key,value,updated_at) VALUES(?,?,datetime('now','localtime'))",
-            (key, value)
-        )
-        conn.commit()
-        conn.close()
+async def buy_movie_db(uid, mid, price):
+    async with db_pool.acquire() as conn:
+        u = await conn.fetchrow("SELECT coins FROM users WHERE user_id=$1", uid)
+        if not u or u['coins'] < price:
+            return False
+        await conn.execute("UPDATE users SET coins=coins-$1 WHERE user_id=$2", price, uid)
+        await conn.execute("INSERT INTO purchases (user_id,movie_id) VALUES ($1,$2)", uid, mid)
         return True
-    except Exception as e:
-        logger.error(f"db_set error: {e}")
-        return False
 
+async def get_stats():
+    async with db_pool.acquire() as conn:
+        return {
+            "total_users":     await conn.fetchval("SELECT COUNT(*) FROM users"),
+            "banned_users":    await conn.fetchval("SELECT COUNT(*) FROM users WHERE is_banned=TRUE"),
+            "total_movies":    await conn.fetchval("SELECT COUNT(*) FROM movies"),
+            "total_purchases": await conn.fetchval("SELECT COUNT(*) FROM purchases"),
+            "today_users":     await conn.fetchval("SELECT COUNT(*) FROM users WHERE joined_at=CURRENT_DATE"),
+            "vip_users":       await conn.fetchval("SELECT COUNT(*) FROM users WHERE vip_type IS NOT NULL AND (vip_expires IS NULL OR vip_expires>NOW())"),
+            "total_ai_msgs":   await conn.fetchval("SELECT COUNT(*) FROM ai_sessions"),
+        }
 
-def db_upsert_user(user_id: int, username: str, full_name: str) -> bool:
+# ═══════════════════════════════════════════════════
+#  VIP TIZIM
+# ═══════════════════════════════════════════════════
+async def get_vip_status(uid):
+    u = await get_user(uid)
+    if not u or not u['vip_type']:
+        return None
+    if u['vip_expires'] and u['vip_expires'] < datetime.now():
+        async with db_pool.acquire() as conn:
+            await conn.execute("UPDATE users SET vip_type=NULL,vip_expires=NULL WHERE user_id=$1", uid)
+        return None
+    return u['vip_type']
+
+async def set_vip(uid, vip_label, days, given_by="admin", coins_paid=0):
+    expires = datetime.now() + timedelta(days=days)
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE users SET vip_type=$1,vip_expires=$2 WHERE user_id=$3", vip_label, expires, uid)
+        await conn.execute("""
+            INSERT INTO vip_history (user_id,vip_type,given_by,expires_at,coins_paid)
+            VALUES ($1,$2,$3,$4,$5)
+        """, uid, vip_label, given_by, expires, coins_paid)
+    return expires
+
+async def buy_vip_coins(uid, plan_key):
+    plan = VIP_PLANS.get(plan_key)
+    if not plan:
+        return False, "Noma'lum plan"
+    u = await get_user(uid)
+    if not u:
+        return False, "Foydalanuvchi topilmadi"
+    if u['coins'] < plan['coins']:
+        return False, f"Yetarli coin yo'q. Kerak: {plan['coins']}, sizda: {u['coins']}"
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE users SET coins=coins-$1 WHERE user_id=$2", plan['coins'], uid)
+    expires = await set_vip(uid, plan['label'], plan['days'], "coins", plan['coins'])
+    return True, expires
+
+def get_ai_limit(vip):
+    if vip == 'vip':     return AI_VIP_LIMIT
+    if vip == 'premium': return AI_PREMIUM_LIMIT
+    return AI_FREE_LIMIT
+
+async def check_ai_limit(uid):
+    u = await get_user(uid)
+    vip = await get_vip_status(uid)
+    limit = get_ai_limit(vip)
+    today = date.today()
+    used = u['ai_used_today'] if u and u['ai_last_date'] == today else 0
+    return used < limit, used, limit
+
+async def increment_ai(uid):
+    today = date.today()
+    async with db_pool.acquire() as conn:
+        u = await conn.fetchrow("SELECT ai_used_today,ai_last_date FROM users WHERE user_id=$1", uid)
+        if u and u['ai_last_date'] == today:
+            await conn.execute("UPDATE users SET ai_used_today=ai_used_today+1 WHERE user_id=$1", uid)
+        else:
+            await conn.execute("UPDATE users SET ai_used_today=1,ai_last_date=$1 WHERE user_id=$2", today, uid)
+
+# ═══════════════════════════════════════════════════
+#  GEMINI AI
+# ═══════════════════════════════════════════════════
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+SYSTEM_PROMPT = (
+    "Sen CineBot — Uzbek tilidagi kino yordamchisisiz. "
+    "Foydalanuvchilarga kinolar haqida ma'lumot berasan, tavsiya qilasan, kino tavsiflarini yozasan. "
+    "Doim uzbek tilida javob ber. Qisqa, aniq va do'stona bo'l. "
+    "Agar kino so'rashsa — janr, yil, aktyorlar haqida ma'lumot ber."
+)
+
+async def get_ai_context(uid):
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT context FROM ai_sessions WHERE user_id=$1", uid)
+        if row:
+            try:
+                return json.loads(row['context'])
+            except:
+                return []
+        return []
+
+async def save_ai_context(uid, ctx):
+    ctx = ctx[-20:]
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO ai_sessions (user_id,context,updated_at)
+            VALUES ($1,$2,NOW())
+            ON CONFLICT (user_id) DO UPDATE SET context=$2,updated_at=NOW()
+        """, uid, json.dumps(ctx, ensure_ascii=False))
+
+async def clear_ai_context(uid):
+    async with db_pool.acquire() as conn:
+        await conn.execute("DELETE FROM ai_sessions WHERE user_id=$1", uid)
+
+async def ask_gemini(uid, text):
+    if not GEMINI_KEY:
+        return "❌ Gemini API kaliti sozlanmagan. GEMINI_API_KEY ni muhit o'zgaruvchisiga qo'shing."
+    ctx = await get_ai_context(uid)
+    ctx.append({"role": "user", "parts": [{"text": text}]})
+    payload = {
+        "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+        "contents": ctx,
+        "generationConfig": {"temperature": 0.8, "maxOutputTokens": 1024}
+    }
     try:
-        conn = get_db()
-        conn.execute("""
-            INSERT INTO users (user_id, username, full_name)
-            VALUES (?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET
-                username    = excluded.username,
-                full_name   = excluded.full_name,
-                last_active = datetime('now','localtime')
-        """, (user_id, username or "", full_name or ""))
-        conn.commit()
-        conn.close()
-        return True
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(f"{GEMINI_URL}?key={GEMINI_KEY}", json=payload,
+                                     headers={"Content-Type": "application/json"})
+            data = resp.json()
+        if "candidates" in data:
+            answer = data["candidates"][0]["content"]["parts"][0]["text"]
+            ctx.append({"role": "model", "parts": [{"text": answer}]})
+            await save_ai_context(uid, ctx)
+            return answer
+        elif "error" in data:
+            return f"❌ AI xatosi: {data['error'].get('message','Noma\'lum')}"
+        return "❌ AI javob bermadi."
+    except httpx.TimeoutException:
+        return "⏳ AI vaqt limiti. Qayta urinib ko'ring."
     except Exception as e:
-        logger.error(f"db_upsert_user error: {e}")
-        return False
+        logger.error(f"Gemini xato: {e}")
+        return "❌ AI bilan ulanishda xato."
 
-
-def db_get_user(user_id: int) -> Optional[Dict]:
+async def gemini_auto_desc(name, year):
+    if not GEMINI_KEY:
+        return "Tavsif mavjud emas"
+    payload = {
+        "contents": [{"role":"user","parts":[{"text":
+            f"'{name}' ({year}) kinosi haqida 2-3 jumlali qisqa uzbek tilidagi tavsif yoz. Faqat tavsifni yoz."
+        }]}],
+        "generationConfig": {"temperature": 0.7, "maxOutputTokens": 256}
+    }
     try:
-        conn = get_db()
-        row  = conn.execute("SELECT * FROM users WHERE user_id=?", (user_id,)).fetchone()
-        conn.close()
-        return dict(row) if row else None
-    except Exception as e:
-        logger.error(f"db_get_user error: {e}")
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(f"{GEMINI_URL}?key={GEMINI_KEY}", json=payload,
+                                     headers={"Content-Type":"application/json"})
+            data = resp.json()
+        if "candidates" in data:
+            return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+    except:
+        pass
+    return "Tavsif mavjud emas"
+
+# ═══════════════════════════════════════════════════
+#  MAJBURIY OBUNA
+# ═══════════════════════════════════════════════════
+async def get_req_channels():
+    async with db_pool.acquire() as conn:
+        return await conn.fetch("SELECT * FROM required_channels ORDER BY id")
+
+async def add_req_channel(link, title="Kanal"):
+    async with db_pool.acquire() as conn:
+        await conn.execute("INSERT INTO required_channels (link,title) VALUES ($1,$2)", link, title)
+
+async def remove_req_channel(ch_id):
+    async with db_pool.acquire() as conn:
+        await conn.execute("DELETE FROM required_channels WHERE id=$1", ch_id)
+        await conn.execute("DELETE FROM user_sub_status WHERE channel_id=$1", ch_id)
+
+def is_tg_link(link):
+    return 't.me/' in link or 'telegram.me/' in link
+
+def extract_tg_uname(link):
+    try:
+        part = link.split('t.me/')[-1] if 't.me/' in link else link.split('telegram.me/')[-1]
+        part = part.strip().strip('/')
+        if part.startswith('+') or '/' in part or not part:
+            return None
+        return f"@{part}"
+    except:
         return None
 
-
-def db_is_premium(user_id: int) -> bool:
-    user = db_get_user(user_id)
-    if not user or not user.get("is_premium"):
+async def check_tg_sub(uid, link):
+    uname = extract_tg_uname(link)
+    if not uname:
         return False
-    exp = user.get("premium_expires", "")
-    if exp and exp < datetime.now().strftime("%Y-%m-%d %H:%M:%S"):
-        try:
-            conn = get_db()
-            conn.execute("UPDATE users SET is_premium=0, premium_expires='' WHERE user_id=?", (user_id,))
-            conn.commit()
-            conn.close()
-        except Exception:
-            pass
+    try:
+        m = await bot.get_chat_member(uname, uid)
+        return m.status not in ('left','kicked','banned')
+    except Exception as e:
+        logger.warning(f"get_chat_member xato ({uname}): {e}")
+        return False
+
+async def get_ext_confirmed(uid, ch_id):
+    async with db_pool.acquire() as conn:
+        r = await conn.fetchrow("SELECT is_subscribed FROM user_sub_status WHERE user_id=$1 AND channel_id=$2", uid, ch_id)
+        return bool(r and r['is_subscribed'])
+
+async def set_ext_confirmed(uid, ch_id):
+    now = datetime.now()
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO user_sub_status (user_id,channel_id,is_subscribed,last_checked,subscribed_at)
+            VALUES ($1,$2,TRUE,$3,$3)
+            ON CONFLICT (user_id,channel_id) DO UPDATE
+            SET is_subscribed=TRUE,last_checked=$3,subscribed_at=COALESCE(user_sub_status.subscribed_at,$3)
+        """, uid, ch_id, now)
+
+async def track_sub(uid, uname, ch, is_sub):
+    ch_id=ch['id']; ch_title=ch['title']; ch_link=ch['link']; now=datetime.now()
+    async with db_pool.acquire() as conn:
+        prev = await conn.fetchrow("SELECT is_subscribed FROM user_sub_status WHERE user_id=$1 AND channel_id=$2", uid, ch_id)
+        prev_s = prev['is_subscribed'] if prev else None
+        if is_sub:
+            await conn.execute("""
+                INSERT INTO user_sub_status (user_id,channel_id,is_subscribed,last_checked,subscribed_at)
+                VALUES ($1,$2,TRUE,$3,$3)
+                ON CONFLICT (user_id,channel_id) DO UPDATE
+                SET is_subscribed=TRUE,last_checked=$3,
+                    subscribed_at=CASE WHEN user_sub_status.is_subscribed=FALSE OR user_sub_status.subscribed_at IS NULL
+                                       THEN $3 ELSE user_sub_status.subscribed_at END
+            """, uid, ch_id, now)
+        else:
+            await conn.execute("""
+                INSERT INTO user_sub_status (user_id,channel_id,is_subscribed,last_checked,unsubscribed_at)
+                VALUES ($1,$2,FALSE,$3,$3)
+                ON CONFLICT (user_id,channel_id) DO UPDATE
+                SET is_subscribed=FALSE,last_checked=$3,
+                    unsubscribed_at=CASE WHEN user_sub_status.is_subscribed=TRUE
+                                         THEN $3 ELSE user_sub_status.unsubscribed_at END
+            """, uid, ch_id, now)
+        event = None
+        if prev_s is None and is_sub:       event = 'first_subscribed'
+        elif prev_s is None and not is_sub: event = 'checked_not_subscribed'
+        elif prev_s is False and is_sub:    event = 'subscribed'
+        elif prev_s is True and not is_sub: event = 'unsubscribed'
+        if event:
+            await conn.execute("""
+                INSERT INTO sub_logs (user_id,user_name,channel_id,channel_title,channel_link,event)
+                VALUES ($1,$2,$3,$4,$5,$6)
+            """, uid, uname, ch_id, ch_title, ch_link, event)
+            asyncio.create_task(_notify_sub(uid, uname, ch_title, ch_link, event))
+
+async def _notify_sub(uid, uname, ch_title, ch_link, event):
+    emj = {'first_subscribed':'🆕✅','subscribed':'✅','checked_not_subscribed':'❌','unsubscribed':'⚠️🔴'}.get(event,'❓')
+    lbl = {'first_subscribed':"birinchi obuna",'subscribed':"qayta obuna",
+           'checked_not_subscribed':"tekshirdi, emas",'unsubscribed':"OBUNANI OLIB TASHLADI!"}.get(event,event)
+    try:
+        await bot.send_message(ADMIN_ID,
+            f"{emj} <b>Obuna hodisasi</b> | {datetime.now().strftime('%d.%m.%Y %H:%M')}\n"
+            f"👤 <b>{uname}</b> (<code>{uid}</code>)\n"
+            f"📌 <a href='{ch_link}'>{ch_title}</a>\n📋 <b>{lbl}</b>",
+            parse_mode="HTML", disable_web_page_preview=True)
+    except: pass
+
+async def check_all_subs(uid, uname):
+    channels = await get_req_channels()
+    if not channels: return []
+    not_sub = []
+    for ch in channels:
+        is_sub = await check_tg_sub(uid, ch['link']) if is_tg_link(ch['link']) else await get_ext_confirmed(uid, ch['id'])
+        await track_sub(uid, uname, ch, is_sub)
+        if not is_sub: not_sub.append(ch)
+    return not_sub
+
+def build_sub_kb(channels):
+    kb = InlineKeyboardBuilder()
+    emj = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣"]
+    for i,ch in enumerate(channels):
+        kb.button(text=f"{emj[i%5]} {ch['title']} — A'zo bo'lish", url=ch['link'])
+    kb.button(text="✅ Obunani Tekshirish", callback_data="check_sub")
+    kb.adjust(1)
+    return kb.as_markup()
+
+async def send_sub_msg(uid, channels):
+    lines = "".join(f"{i}. <a href='{ch['link']}'>{ch['title']}</a>\n" for i,ch in enumerate(channels,1))
+    text = f"⚠️ <b>Botdan foydalanish uchun kanallarga a'zo bo'ling:</b>\n\n{lines}\nA'zo bo'lgach ✅ <b>Obunani Tekshirish</b> tugmasini bosing."
+    try:
+        await bot.send_message(uid, text, reply_markup=build_sub_kb(channels), parse_mode="HTML", disable_web_page_preview=True)
+    except Exception as e:
+        logger.warning(f"send_sub_msg xato: {e}")
+
+async def sub_guard(m: Message):
+    u = await get_user(m.from_user.id)
+    if not u: return True
+    if u['is_banned']: return True
+    ns = await check_all_subs(m.from_user.id, u['name'])
+    if ns:
+        await send_sub_msg(m.from_user.id, ns)
         return False
     return True
 
-
-def db_set_premium(user_id: int, active: bool, days: int = 30) -> bool:
-    try:
-        conn = get_db()
-        if active:
-            expires = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
-            conn.execute(
-                "UPDATE users SET is_premium=1, premium_expires=? WHERE user_id=?",
-                (expires, user_id)
-            )
-        else:
-            conn.execute(
-                "UPDATE users SET is_premium=0, premium_expires='' WHERE user_id=?",
-                (user_id,)
-            )
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        logger.error(f"db_set_premium error: {e}")
-        return False
-
-
-def db_get_image_count(user_id: int) -> int:
-    try:
-        conn = get_db()
-        row  = conn.execute("SELECT images_used FROM users WHERE user_id=?", (user_id,)).fetchone()
-        conn.close()
-        return row["images_used"] if row else 0
-    except Exception:
-        return 0
-
-
-def db_inc_image(user_id: int):
-    try:
-        conn = get_db()
-        conn.execute("UPDATE users SET images_used=images_used+1 WHERE user_id=?", (user_id,))
-        today = datetime.now().strftime("%Y-%m-%d")
-        conn.execute("""
-            INSERT INTO daily_stats (date, images_made) VALUES (?,1)
-            ON CONFLICT(date) DO UPDATE SET images_made=images_made+1
-        """, (today,))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.error(f"db_inc_image error: {e}")
-
-
-def db_ban_user(user_id: int, ban: bool = True, reason: str = "") -> bool:
-    try:
-        conn = get_db()
-        conn.execute(
-            "UPDATE users SET is_banned=?, ban_reason=? WHERE user_id=?",
-            (1 if ban else 0, reason, user_id)
-        )
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        logger.error(f"db_ban_user error: {e}")
-        return False
-
-
-def db_inc_msgs(user_id: int):
-    try:
-        conn = get_db()
-        conn.execute(
-            "UPDATE users SET total_msgs=total_msgs+1, last_active=datetime('now','localtime') WHERE user_id=?",
-            (user_id,)
-        )
-        today = datetime.now().strftime("%Y-%m-%d")
-        conn.execute("""
-            INSERT INTO daily_stats (date, total_msgs, grok_msgs) VALUES (?,1,1)
-            ON CONFLICT(date) DO UPDATE SET total_msgs=total_msgs+1, grok_msgs=grok_msgs+1
-        """, (today,))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.error(f"db_inc_msgs error: {e}")
-
-
-def db_add_msg(user_id: int, role: str, content: str) -> bool:
-    try:
-        conn = get_db()
-        conn.execute(
-            "INSERT INTO conversations (user_id, role, content) VALUES (?,?,?)",
-            (user_id, role, content)
-        )
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        logger.error(f"db_add_msg error: {e}")
-        return False
-
-
-def db_get_history(user_id: int, limit: int = MAX_HISTORY) -> List[Dict]:
-    try:
-        conn = get_db()
-        rows = conn.execute("""
-            SELECT role, content FROM conversations
-            WHERE user_id=? ORDER BY id DESC LIMIT ?
-        """, (user_id, limit)).fetchall()
-        conn.close()
-        return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
-    except Exception as e:
-        logger.error(f"db_get_history error: {e}")
-        return []
-
-
-def db_get_history_display(user_id: int, limit: int = 10) -> List[Dict]:
-    try:
-        conn = get_db()
-        rows = conn.execute("""
-            SELECT role, content, created_at FROM conversations
-            WHERE user_id=? ORDER BY id DESC LIMIT ?
-        """, (user_id, limit)).fetchall()
-        conn.close()
-        return [dict(r) for r in reversed(rows)]
-    except Exception:
-        return []
-
-
-def db_clear_history(user_id: int) -> bool:
-    try:
-        conn = get_db()
-        conn.execute("DELETE FROM conversations WHERE user_id=?", (user_id,))
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        logger.error(f"db_clear_history error: {e}")
-        return False
-
-
-def db_log_admin(admin_id: int, admin_name: str, action: str,
-                 target_id: int = 0, details: str = "") -> bool:
-    try:
-        conn = get_db()
-        conn.execute("""
-            INSERT INTO admin_logs (admin_id, admin_name, action, target_id, details)
-            VALUES (?,?,?,?,?)
-        """, (admin_id, admin_name, action, target_id, details))
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        logger.error(f"db_log_admin error: {e}")
-        return False
-
-
-def db_get_admin_logs(limit: int = 20) -> List[Dict]:
-    try:
-        conn = get_db()
-        rows = conn.execute(
-            "SELECT * FROM admin_logs ORDER BY id DESC LIMIT ?", (limit,)
-        ).fetchall()
-        conn.close()
-        return [dict(r) for r in rows]
-    except Exception:
-        return []
-
-
-def db_get_stats() -> Dict:
-    try:
-        conn = get_db()
-        total   = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-        banned  = conn.execute("SELECT COUNT(*) FROM users WHERE is_banned=1").fetchone()[0]
-        premium = conn.execute("SELECT COUNT(*) FROM users WHERE is_premium=1").fetchone()[0]
-        act24   = conn.execute(
-            "SELECT COUNT(*) FROM users WHERE last_active > datetime('now','-1 day','localtime')"
-        ).fetchone()[0]
-        act7    = conn.execute(
-            "SELECT COUNT(*) FROM users WHERE last_active > datetime('now','-7 day','localtime')"
-        ).fetchone()[0]
-        total_m = conn.execute("SELECT COUNT(*) FROM conversations WHERE role='user'").fetchone()[0]
-        today_m = conn.execute(
-            "SELECT COUNT(*) FROM conversations WHERE role='user' AND date(created_at)=date('now','localtime')"
-        ).fetchone()[0]
-        imgs    = conn.execute("SELECT COUNT(*) FROM images").fetchone()[0]
-        pend    = conn.execute(
-            "SELECT COUNT(*) FROM premium_requests WHERE status='pending'"
-        ).fetchone()[0]
-        conn.close()
-        return {
-            "total": total, "banned": banned, "premium": premium,
-            "active_24": act24, "active_7": act7,
-            "total_msgs": total_m, "today_msgs": today_m,
-            "images": imgs, "pending_premium": pend
-        }
-    except Exception as e:
-        logger.error(f"db_get_stats error: {e}")
-        return {}
-
-
-def db_get_all_users(limit: int = 50, offset: int = 0) -> List[Dict]:
-    try:
-        conn = get_db()
-        rows = conn.execute(
-            "SELECT * FROM users ORDER BY joined_at DESC LIMIT ? OFFSET ?",
-            (limit, offset)
-        ).fetchall()
-        conn.close()
-        return [dict(r) for r in rows]
-    except Exception:
-        return []
-
-
-def db_search_user(query: str) -> List[Dict]:
-    try:
-        conn = get_db()
-        rows = conn.execute("""
-            SELECT * FROM users
-            WHERE username LIKE ? OR full_name LIKE ? OR CAST(user_id AS TEXT) LIKE ?
-            LIMIT 10
-        """, (f"%{query}%", f"%{query}%", f"%{query}%")).fetchall()
-        conn.close()
-        return [dict(r) for r in rows]
-    except Exception:
-        return []
-
-
-def db_get_premium_users() -> List[Dict]:
-    try:
-        conn = get_db()
-        rows = conn.execute(
-            "SELECT * FROM users WHERE is_premium=1 ORDER BY premium_expires DESC"
-        ).fetchall()
-        conn.close()
-        return [dict(r) for r in rows]
-    except Exception:
-        return []
-
-
-def db_add_premium_request(user_id: int, message: str = "") -> int:
-    try:
-        conn = get_db()
-        cur  = conn.execute(
-            "INSERT INTO premium_requests (user_id, message) VALUES (?,?)",
-            (user_id, message)
-        )
-        rid  = cur.lastrowid
-        today = datetime.now().strftime("%Y-%m-%d")
-        conn.execute("""
-            INSERT INTO daily_stats (date, premium_requests) VALUES (?,1)
-            ON CONFLICT(date) DO UPDATE SET premium_requests=premium_requests+1
-        """, (today,))
-        conn.commit()
-        conn.close()
-        return rid
-    except Exception as e:
-        logger.error(f"db_add_premium_request error: {e}")
-        return 0
-
-
-def db_get_pending_requests() -> List[Dict]:
-    try:
-        conn = get_db()
-        rows = conn.execute("""
-            SELECT pr.*, u.username, u.full_name
-            FROM premium_requests pr
-            LEFT JOIN users u ON u.user_id = pr.user_id
-            WHERE pr.status='pending'
-            ORDER BY pr.created_at DESC LIMIT 20
-        """).fetchall()
-        conn.close()
-        return [dict(r) for r in rows]
-    except Exception:
-        return []
-
-
-def db_update_request(req_id: int, status: str) -> bool:
-    try:
-        conn = get_db()
-        conn.execute("UPDATE premium_requests SET status=? WHERE id=?", (status, req_id))
-        conn.commit()
-        conn.close()
-        return True
-    except Exception:
-        return False
-
-
-def db_get_blocked_words() -> List[str]:
-    try:
-        conn = get_db()
-        rows = conn.execute("SELECT word FROM blocked_words").fetchall()
-        conn.close()
-        return [r["word"] for r in rows]
-    except Exception:
-        return []
-
-
-def db_add_blocked_word(word: str, admin_id: int) -> bool:
-    try:
-        conn = get_db()
-        conn.execute(
-            "INSERT OR IGNORE INTO blocked_words (word, added_by) VALUES (?,?)",
-            (word.lower(), admin_id)
-        )
-        conn.commit()
-        conn.close()
-        return True
-    except Exception:
-        return False
-
-
-def db_del_blocked_word(word: str) -> bool:
-    try:
-        conn = get_db()
-        conn.execute("DELETE FROM blocked_words WHERE word=?", (word.lower(),))
-        conn.commit()
-        conn.close()
-        return True
-    except Exception:
-        return False
-
-
-def db_get_daily_stats(days: int = 7) -> List[Dict]:
-    try:
-        conn = get_db()
-        rows = conn.execute(
-            "SELECT * FROM daily_stats ORDER BY date DESC LIMIT ?", (days,)
-        ).fetchall()
-        conn.close()
-        return [dict(r) for r in rows]
-    except Exception:
-        return []
-
-
-def db_set_note(user_id: int, note: str) -> bool:
-    try:
-        conn = get_db()
-        conn.execute("UPDATE users SET note=? WHERE user_id=?", (note, user_id))
-        conn.commit()
-        conn.close()
-        return True
-    except Exception:
-        return False
-
-
-def db_update_quiz(user_id: int, correct: bool):
-    try:
-        conn = get_db()
-        if correct:
-            conn.execute(
-                "UPDATE users SET quiz_score=quiz_score+1, quiz_total=quiz_total+1 WHERE user_id=?",
-                (user_id,)
-            )
-        else:
-            conn.execute(
-                "UPDATE users SET quiz_total=quiz_total+1 WHERE user_id=?",
-                (user_id,)
-            )
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.error(f"db_update_quiz error: {e}")
-
-
-def db_reset_images(user_id: int) -> bool:
-    try:
-        conn = get_db()
-        conn.execute("UPDATE users SET images_used=0 WHERE user_id=?", (user_id,))
-        conn.commit()
-        conn.close()
-        return True
-    except Exception:
-        return False
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  GROK AI KLIENT
-# ══════════════════════════════════════════════════════════════════════════════
-
-_grok_client: Optional[AsyncOpenAI] = None
-
-def get_grok_client() -> AsyncOpenAI:
-    global _grok_client
-    if _grok_client is None:
-        _grok_client = AsyncOpenAI(
-            api_key  = GROK_API_KEY,
-            base_url = "https://api.x.ai/v1",
-        )
-    return _grok_client
-
-
-async def grok_chat(messages: List[Dict], system: str = SYSTEM_PROMPT) -> str:
-    if not GROK_API_KEY or GROK_API_KEY.startswith("BU_YERGA"):
-        return "Grok API kaliti kiritilmagan! GROK_API_KEY ni to'ldiring."
-    try:
-        client = get_grok_client()
-        full   = [{"role": "system", "content": system}] + messages
-        resp   = await client.chat.completions.create(
-            model       = db_get("grok_model", GROK_MODEL),
-            messages    = full,
-            max_tokens  = int(db_get("max_tokens", str(MAX_TOKENS))),
-            temperature = float(db_get("temperature", str(TEMPERATURE))),
-        )
-        return resp.choices[0].message.content or "Bo'sh javob."
-    except openai.AuthenticationError:
-        return "Grok API kaliti noto'g'ri. https://console.x.ai/ dan tekshiring."
-    except openai.RateLimitError:
-        return "Grok cheklovi (Rate Limit). Biroz kuting."
-    except openai.APIConnectionError:
-        return "Grok serveriga ulanib bo'lmadi. Internet aloqasini tekshiring."
-    except openai.BadRequestError as e:
-        return f"So'rov rad etildi: {str(e)[:200]}"
-    except Exception as e:
-        logger.error(f"Grok error: {e}")
-        return f"Grok xatoligi: {str(e)[:200]}"
-
-
-async def grok_single(prompt: str, system: str = SYSTEM_PROMPT) -> str:
-    return await grok_chat([{"role": "user", "content": prompt}], system)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════
 #  YORDAMCHI FUNKSIYALAR
-# ══════════════════════════════════════════════════════════════════════════════
-
-def is_admin(user_id: int, ctx: ContextTypes.DEFAULT_TYPE = None) -> bool:
-    if user_id in ADMIN_IDS:
-        return True
-    if ctx and ctx.user_data.get("is_temp_admin"):
-        return True
-    return False
-
-
-def check_banned(user_id: int) -> Optional[str]:
-    user = db_get_user(user_id)
-    if user and user.get("is_banned"):
-        reason = user.get("ban_reason", "")
-        msg = "Siz botdan ban qilingansiz."
-        if reason:
-            msg += f"\nSabab: {reason}"
-        return msg
-    return None
-
-
-def check_bot_on(user_id: int = 0) -> Optional[str]:
-    if db_get("bot_enabled") == "0" and user_id not in ADMIN_IDS:
-        return db_get("maintenance_msg")
-    return None
-
-
-def check_blocked(text: str) -> bool:
-    words = db_get_blocked_words()
-    tl    = text.lower()
-    return any(w in tl for w in words)
-
-
-def mask_key(key: str) -> str:
-    if not key or len(key) < 8 or key.startswith("BU_YERGA"):
-        return "Kiritilmagan"
-    return f"{key[:8]}...{key[-4:]}"
-
-
-def user_badge(user: Dict) -> str:
-    if user.get("is_banned"):
-        return "[BAN]"
-    if user.get("is_premium"):
-        return "[PREMIUM]"
-    return "[ODDIY]"
-
-
-def safe_md(text: str) -> str:
-    """Markdown belgilarini tozalash — Pydroid 3 uchun muhim"""
-    if not text:
-        return ""
-    for ch in ['*', '_', '`', '[', ']', '(', ')', '~', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']:
-        text = text.replace(ch, '')
-    return text
-
-
-def format_user_card(user: Dict) -> str:
-    badge   = user_badge(user)
-    name    = user.get("full_name") or user.get("username") or "Nomsiz"
-    uname   = f"@{user['username']}" if user.get("username") else "-"
-    prem    = "Premium" if user.get("is_premium") else "Oddiy"
-    exp     = user.get("premium_expires", "")[:16] if user.get("is_premium") else "-"
-    imgs    = user.get("images_used", 0)
-    msgs    = user.get("total_msgs", 0)
-    note    = user.get("note", "")
-    text = (
-        f"{badge} {name}\n"
-        f"ID: {user['user_id']}\n"
-        f"Username: {uname}\n"
-        f"Holat: {prem}\n"
-        f"Premium tugash: {exp}\n"
-        f"Rasmlar: {imgs}\n"
-        f"Xabarlar: {msgs}\n"
-        f"Qoshilgan: {user.get('joined_at','')[:10]}\n"
-        f"Faollik: {user.get('last_active','')[:16]}"
-    )
-    if note:
-        text += f"\nIzoh: {note}"
-    return text
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  KLAVIATURALAR
-# ══════════════════════════════════════════════════════════════════════════════
-
-def kb_main(is_prem: bool = False) -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton("Grok bilan suhbat", callback_data="chat_start")],
-        [
-            InlineKeyboardButton("Rasm yaratish",  callback_data="image_mode"),
-            InlineKeyboardButton("Quiz",            callback_data="quiz_menu"),
-        ],
-        [
-            InlineKeyboardButton("Tarjima",         callback_data="translate_menu"),
-            InlineKeyboardButton("Matn tahlil",     callback_data="analyze_menu"),
-        ],
-        [
-            InlineKeyboardButton("Suhbat tarixi",   callback_data="history_menu"),
-            InlineKeyboardButton("Profil",          callback_data="profile"),
-        ],
-    ]
-    if is_prem:
-        rows.append([InlineKeyboardButton("Premium funksiyalar", callback_data="premium_features")])
-    else:
-        rows.append([InlineKeyboardButton("Premium olish", callback_data="buy_premium")])
-    rows.append([InlineKeyboardButton("Yordam", callback_data="help_menu")])
-    return InlineKeyboardMarkup(rows)
-
-
-def kb_premium_features() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("Rasm (HD)",         callback_data="image_hd"),
-            InlineKeyboardButton("Kod yozish",        callback_data="code_mode"),
-        ],
-        [
-            InlineKeyboardButton("Email yozish",      callback_data="email_mode"),
-            InlineKeyboardButton("Matn yaratish",     callback_data="content_mode"),
-        ],
-        [
-            InlineKeyboardButton("Chuqur tahlil",     callback_data="deep_analyze"),
-            InlineKeyboardButton("Ko'p til tarjima",  callback_data="multi_translate"),
-        ],
-        [
-            InlineKeyboardButton("Biznes maslahat",   callback_data="business_advice"),
-            InlineKeyboardButton("O'qish rejasi",     callback_data="study_plan"),
-        ],
-        [
-            InlineKeyboardButton("Maqsad rejasi",     callback_data="goal_plan"),
-            InlineKeyboardButton("Debat",             callback_data="debate_mode"),
-        ],
-        [
-            InlineKeyboardButton("CV / Rezyume",      callback_data="cv_mode"),
-            InlineKeyboardButton("Murakkab hisob",    callback_data="calc_mode"),
-        ],
-        [InlineKeyboardButton("Asosiy menyu",         callback_data="main_menu")],
-    ])
-
-
-def kb_quiz_menu() -> InlineKeyboardMarkup:
-    btns = []
-    row  = []
-    for i, topic in enumerate(QUIZ_TOPICS):
-        row.append(InlineKeyboardButton(topic, callback_data=f"quiz_topic_{topic}"))
-        if len(row) == 2:
-            btns.append(row)
-            row = []
-    if row:
-        btns.append(row)
-    btns.append([InlineKeyboardButton("Tasodifiy", callback_data="quiz_random")])
-    btns.append([InlineKeyboardButton("Mening natijam", callback_data="quiz_stats")])
-    btns.append([InlineKeyboardButton("Asosiy menyu", callback_data="main_menu")])
-    return InlineKeyboardMarkup(btns)
-
-
-def kb_translate() -> InlineKeyboardMarkup:
-    btns = []
-    row  = []
-    for label, lang in TRANSLATE_LANGS:
-        row.append(InlineKeyboardButton(label, callback_data=f"trans_{lang}"))
-        if len(row) == 2:
-            btns.append(row)
-            row = []
-    if row:
-        btns.append(row)
-    btns.append([InlineKeyboardButton("Asosiy menyu", callback_data="main_menu")])
-    return InlineKeyboardMarkup(btns)
-
-
-def kb_analyze() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("Grammatika",    callback_data="anal_grammar"),
-            InlineKeyboardButton("Xulosa",        callback_data="anal_summary"),
-        ],
-        [
-            InlineKeyboardButton("Tuygu tahlili", callback_data="anal_sentiment"),
-            InlineKeyboardButton("Kalit sozlar",  callback_data="anal_keywords"),
-        ],
-        [
-            InlineKeyboardButton("Qayta yozish",  callback_data="anal_rewrite"),
-            InlineKeyboardButton("Yaxshilash",    callback_data="anal_improve"),
-        ],
-        [InlineKeyboardButton("Asosiy menyu",     callback_data="main_menu")],
-    ])
-
-
-def kb_history() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("Korish (oxirgi 10)", callback_data="hist_view"),
-            InlineKeyboardButton("Ochirish",           callback_data="hist_clear_confirm"),
-        ],
-        [InlineKeyboardButton("Asosiy menyu", callback_data="main_menu")],
-    ])
-
-
-def kb_buy_premium() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Premium sotib olish", callback_data="prem_request")],
-        [InlineKeyboardButton("Premium imtiyozlari", callback_data="prem_benefits")],
-        [InlineKeyboardButton("Asosiy menyu",        callback_data="main_menu")],
-    ])
-
-
-def kb_back(target: str = "main_menu", label: str = "Orqaga") -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton(label, callback_data=target)]])
-
-
-def kb_confirm(action: str, label: str = "Ha") -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(f"{label}", callback_data=f"confirm_{action}"),
-            InlineKeyboardButton("Bekor",   callback_data="main_menu"),
-        ]
-    ])
-
-
-def kb_admin_main() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("Statistika",           callback_data="adm_stats"),
-            InlineKeyboardButton("Foydalanuvchilar",     callback_data="adm_users"),
-        ],
-        [
-            InlineKeyboardButton("Premium boshqaruv",    callback_data="adm_premium"),
-            InlineKeyboardButton("Premium sorovlar",     callback_data="adm_prem_requests"),
-        ],
-        [
-            InlineKeyboardButton("Broadcast",            callback_data="adm_broadcast"),
-            InlineKeyboardButton("Loglar",               callback_data="adm_logs"),
-        ],
-        [
-            InlineKeyboardButton("Sozlamalar",           callback_data="adm_settings"),
-            InlineKeyboardButton("Xavfsizlik",           callback_data="adm_security"),
-        ],
-        [
-            InlineKeyboardButton("API holati",           callback_data="adm_apikeys"),
-            InlineKeyboardButton("Kunlik hisobot",       callback_data="adm_daily"),
-        ],
-        [
-            InlineKeyboardButton("Bloklangan sozlar",    callback_data="adm_blocked"),
-            InlineKeyboardButton("Rasm statistika",      callback_data="adm_imgstats"),
-        ],
-        [
-            InlineKeyboardButton("DB tozalash",          callback_data="adm_db_clean"),
-            InlineKeyboardButton("Premium foydalanuvchilar", callback_data="adm_prem_list"),
-        ],
-    ])
-
-
-def kb_admin_users() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("Royxat",         callback_data="adm_userlist"),
-            InlineKeyboardButton("Qidirish",       callback_data="adm_search"),
-        ],
-        [
-            InlineKeyboardButton("Ban",            callback_data="adm_ban"),
-            InlineKeyboardButton("Unban",          callback_data="adm_unban"),
-        ],
-        [
-            InlineKeyboardButton("Izoh",           callback_data="adm_note"),
-            InlineKeyboardButton("Xabar yozish",   callback_data="adm_msg_user"),
-        ],
-        [
-            InlineKeyboardButton("Tarixni ochirish",   callback_data="adm_clear_user_hist"),
-            InlineKeyboardButton("Rasm limitni reset", callback_data="adm_reset_img"),
-        ],
-        [InlineKeyboardButton("Admin menyu", callback_data="adm_main")],
-    ])
-
-
-def kb_admin_premium() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("Premium berish",     callback_data="adm_give_prem"),
-            InlineKeyboardButton("Premium olish",      callback_data="adm_remove_prem"),
-        ],
-        [
-            InlineKeyboardButton("Narxni ozgartirish", callback_data="adm_change_price"),
-            InlineKeyboardButton("Tolov malumoti",     callback_data="adm_change_payment"),
-        ],
-        [
-            InlineKeyboardButton("Premium statistika",  callback_data="adm_prem_stats"),
-            InlineKeyboardButton("Kutayotgan sorovlar", callback_data="adm_prem_requests"),
-        ],
-        [InlineKeyboardButton("Admin menyu", callback_data="adm_main")],
-    ])
-
-
-def kb_admin_settings() -> InlineKeyboardMarkup:
-    bot_en = db_get("bot_enabled")
-    img_en = db_get("image_enabled")
-    onoff  = lambda v: "Yoqiq" if v == "1" else "Ochiq"
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"Bot: {onoff(bot_en)}",   callback_data="adm_toggle_bot")],
-        [InlineKeyboardButton(f"Rasm: {onoff(img_en)}",  callback_data="adm_toggle_img")],
-        [InlineKeyboardButton("Xush kelibsiz xabari",    callback_data="adm_edit_welcome")],
-        [InlineKeyboardButton("Texnik ish xabari",       callback_data="adm_edit_maint")],
-        [InlineKeyboardButton("Max tokenlar",            callback_data="adm_edit_maxtok")],
-        [InlineKeyboardButton("Temperature",             callback_data="adm_edit_temp")],
-        [InlineKeyboardButton("Grok modeli",             callback_data="adm_edit_model")],
-        [InlineKeyboardButton("Admin menyu",             callback_data="adm_main")],
-    ])
-
-
-def kb_admin_security() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Parolni ozgartirish",  callback_data="adm_change_pass")],
-        [InlineKeyboardButton("Loglarni tozalash",    callback_data="adm_clear_logs")],
-        [InlineKeyboardButton("Admin ID lar",         callback_data="adm_admin_list")],
-        [InlineKeyboardButton("Ban royxati",          callback_data="adm_banlist")],
-        [InlineKeyboardButton("Admin menyu",          callback_data="adm_main")],
-    ])
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  BUYRUQLAR
-# ══════════════════════════════════════════════════════════════════════════════
-
-async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    db_upsert_user(user.id, user.username or "", user.full_name or "")
-
-    if err := check_bot_on(user.id):
-        await update.message.reply_text(err)
-        return
-    if ban := check_banned(user.id):
-        await update.message.reply_text(ban)
-        return
-
-    is_prem = db_is_premium(user.id)
-    welcome = db_get("welcome_msg")
-    badge   = "Premium foydalanuvchi" if is_prem else "Oddiy foydalanuvchi"
-    text    = f"{welcome}\n\n{badge}"
-    await update.message.reply_text(text, reply_markup=kb_main(is_prem))
-
-
-async def cmd_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    user    = update.effective_user
-    db_upsert_user(user.id, user.username or "", user.full_name or "")
-    is_prem = db_is_premium(user.id)
-    await update.message.reply_text("Asosiy menyu", reply_markup=kb_main(is_prem))
-
-
-async def cmd_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    db_upsert_user(user.id, user.username or "", user.full_name or "")
-    if is_admin(user.id, ctx):
-        await _show_admin_panel(update, ctx)
-        return
-    ctx.user_data["waiting_admin_pass"] = True
-    await update.message.reply_text("Admin paneli\n\nKirish uchun parolni yozing:")
-
-
-async def cmd_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if not is_admin(user.id, ctx):
-        await update.message.reply_text("Bu buyruq faqat adminlar uchun.")
-        return
-    s = db_get_stats()
-    await update.message.reply_text(
-        f"Statistika\n\n"
-        f"Jami: {s.get('total',0)}\n"
-        f"Premium: {s.get('premium',0)}\n"
-        f"Faol (24s): {s.get('active_24',0)}\n"
-        f"Banlangan: {s.get('banned',0)}\n"
-        f"Bugungi xabarlar: {s.get('today_msgs',0)}\n"
-        f"Jami xabarlar: {s.get('total_msgs',0)}\n"
-        f"Rasmlar: {s.get('images',0)}\n"
-        f"Kutayotgan sorovlar: {s.get('pending_premium',0)}",
-        reply_markup=kb_back("adm_main")
-    )
-
-
-async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    user    = update.effective_user
-    is_prem = db_is_premium(user.id)
-    text = (
-        "Bot haqida\n\n"
-        "Grok AI - xAI tomonidan yaratilgan kuchli sun'iy intellekt\n\n"
-        "Buyruqlar:\n"
-        "/start - Botni ishga tushirish\n"
-        "/menu - Asosiy menyu\n"
-        "/premium - Premium haqida\n"
-        "/admin - Admin paneli\n"
-        "/help - Yordam\n\n"
-        "Funksiyalar:\n"
-        "- Grok bilan suhbat\n"
-        "- Rasm yaratish\n"
-        "- Quiz / Test\n"
-        "- Matn tarjima\n"
-        "- Matn tahlil\n"
-    )
-    if is_prem:
-        text += (
-            "\nPremium funksiyalar:\n"
-            "- HD rasm yaratish\n"
-            "- Kod yozish\n"
-            "- Email yozish\n"
-            "- Chuqur tahlil\n"
-            "- Biznes maslahat\n"
-            "- CV / Rezyume\n"
-        )
-    await update.message.reply_text(text, reply_markup=kb_back())
-
-
-async def cmd_premium(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    user    = update.effective_user
-    is_prem = db_is_premium(user.id)
-    if is_prem:
-        u   = db_get_user(user.id)
-        exp = u.get("premium_expires", "")[:16] if u else "-"
-        await update.message.reply_text(
-            f"Siz Premium foydalanuvchisiz!\n\n"
-            f"Tugash sanasi: {exp}\n\n"
-            f"Barcha premium funksiyalar sizga ochiq!",
-            reply_markup=kb_back()
-        )
-    else:
-        price_uzs = db_get("premium_price_uzs", str(PREMIUM_PRICE_UZS))
-        price_usd = db_get("premium_price_usd", str(PREMIUM_PRICE_USD))
-        await update.message.reply_text(
-            f"Premium obuna\n\n"
-            f"Narxi: {price_uzs} som / ${price_usd}\n"
-            f"Muddat: 30 kun\n\n"
-            f"Premium imtiyozlari:\n"
-            f"- {PREMIUM_IMAGE_LIMIT} ta rasm (oddiy: {FREE_IMAGE_LIMIT} ta)\n"
-            f"- Kod yozish\n"
-            f"- Email yozish\n"
-            f"- Kontent yaratish\n"
-            f"- Chuqur tahlil\n"
-            f"- Biznes maslahat\n"
-            f"- CV / Rezyume\n"
-            f"- Ko'p til tarjima\n",
-            reply_markup=kb_buy_premium()
-        )
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  XABAR HANDLERI
-# ══════════════════════════════════════════════════════════════════════════════
-
-async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text:
-        return
-
-    user = update.effective_user
-    text = update.message.text.strip()
-    db_upsert_user(user.id, user.username or "", user.full_name or "")
-
-    if ctx.user_data.get("waiting_admin_pass"):
-        await _check_admin_pass(update, ctx, text)
-        return
-
-    if is_admin(user.id, ctx) and ctx.user_data.get("admin_action"):
-        handled = await _handle_admin_text(update, ctx, text)
-        if handled:
-            return
-
-    if err := check_bot_on(user.id):
-        await update.message.reply_text(err)
-        return
-
-    if ban := check_banned(user.id):
-        await update.message.reply_text(ban)
-        return
-
-    if check_blocked(text):
-        await update.message.reply_text("Xabaringizda taqiqlangan soz mavjud.")
-        return
-
-    if ctx.user_data.get("broadcast_mode") and is_admin(user.id, ctx):
-        ctx.user_data.pop("broadcast_mode", None)
-        await _do_broadcast(update, ctx, text)
-        return
-
-    if ctx.user_data.get("image_mode"):
-        ctx.user_data.pop("image_mode", None)
-        await _do_image(update, ctx, text)
-        return
-
-    if ctx.user_data.get("prem_req_mode"):
-        ctx.user_data.pop("prem_req_mode", None)
-        await _submit_premium_request(update, ctx, text)
-        return
-
-    if ctx.user_data.get("quiz_waiting"):
-        await _check_quiz_answer(update, ctx, text)
-        return
-
-    mode = ctx.user_data.get("chat_mode")
-    if mode:
-        await _handle_mode(update, ctx, text, mode)
-        return
-
-    await _handle_chat(update, ctx, text)
-
-
-async def _handle_chat(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text: str):
-    user = update.effective_user
-    db_add_msg(user.id, "user", text)
-    db_inc_msgs(user.id)
-
-    try:
-        await update.message.chat.send_action(ChatAction.TYPING)
-    except Exception:
-        pass
-
-    history = db_get_history(user.id)
-    reply   = await grok_chat(history)
-
-    if not any(reply.startswith(x) for x in ("Grok API", "Grok cheklovi", "Grok serveriga", "So'rov rad", "Grok xatoligi")):
-        db_add_msg(user.id, "assistant", reply)
-
-    kb = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("Tarixni ochirish", callback_data="hist_clear_confirm"),
-            InlineKeyboardButton("Menyu",            callback_data="main_menu"),
-        ]
-    ])
-    await update.message.reply_text(f"Grok:\n\n{reply}", reply_markup=kb)
-
-
-async def _handle_mode(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text: str, mode: str):
-    await update.message.chat.send_action(ChatAction.TYPING)
-
-    prompts = {
-        "translate":       lambda t: f"'{ctx.user_data.get('trans_lang','ingliz')}' tiliga tarjima qil:\n\n{t}",
-        "anal_grammar":    lambda t: f"Quyidagi matnning grammatikasini tekshir va xatolarni kors:\n\n{t}",
-        "anal_summary":    lambda t: f"Quyidagi matnning qisqacha xulosasini yoz:\n\n{t}",
-        "anal_sentiment":  lambda t: f"Quyidagi matnning kayfiyatini (ijobiy/salbiy/neytral) aniqla:\n\n{t}",
-        "anal_keywords":   lambda t: f"Quyidagi matndan asosiy kalit sozlarni ajrat:\n\n{t}",
-        "anal_rewrite":    lambda t: f"Quyidagi matnni qayta yoz (mazmunni saqlab, uslubni yaxshila):\n\n{t}",
-        "anal_improve":    lambda t: f"Quyidagi matnni yaxshila va takomillashtir:\n\n{t}",
-        "code_mode":       lambda t: f"Dasturlash: {t}\n\nKodini yoz yoki tushuntir.",
-        "email_mode":      lambda t: f"Professional email yoz: {t}",
-        "content_mode":    lambda t: f"Kontent yarat: {t}",
-        "deep_analyze":    lambda t: f"Chuqur tahlil qil: {t}",
-        "multi_translate": lambda t: f"O'zbek, Rus, va Ingliz tillariga tarjima qil:\n\n{t}",
-        "business_advice": lambda t: f"Biznes maslahat ber: {t}",
-        "study_plan":      lambda t: f"O'qish rejasi tuz: {t}",
-        "goal_plan":       lambda t: f"Maqsadga erishish rejasi tuz: {t}",
-        "debate_mode":     lambda t: f"Mavzu: {t}\nIkkala tomonning argumentlarini keltir.",
-        "cv_mode":         lambda t: f"CV / Rezyume yoz: {t}",
-        "calc_mode":       lambda t: f"Hisob-kitob qil va tushuntir: {t}",
-    }
-
-    prompt_fn = prompts.get(mode)
-    if not prompt_fn:
-        ctx.user_data.pop("chat_mode", None)
-        await _handle_chat(update, ctx, text)
-        return
-
-    ctx.user_data.pop("chat_mode", None)
-    reply = await grok_single(prompt_fn(text))
-    await update.message.reply_text(f"Grok javobi:\n\n{reply}", reply_markup=kb_back())
-
-
-async def _do_image(update: Update, ctx: ContextTypes.DEFAULT_TYPE, prompt: str):
-    user    = update.effective_user
-    is_prem = db_is_premium(user.id)
-    limit   = PREMIUM_IMAGE_LIMIT if is_prem else FREE_IMAGE_LIMIT
-    used    = db_get_image_count(user.id)
-
-    if used >= limit:
-        if is_prem:
-            await update.message.reply_text(
-                f"Premium limitingiz tugadi! ({used}/{limit} ta rasm)\nAdmin bilan boglanin.",
-                reply_markup=kb_back()
-            )
-        else:
-            price_uzs = db_get("premium_price_uzs", str(PREMIUM_PRICE_UZS))
-            await update.message.reply_text(
-                f"Rasm limitingiz tugadi!\n\n"
-                f"Oddiy: {FREE_IMAGE_LIMIT} ta\n"
-                f"Premium: {PREMIUM_IMAGE_LIMIT} ta\n\n"
-                f"Premium narxi: {price_uzs} som",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("Premium olish", callback_data="buy_premium")],
-                    [InlineKeyboardButton("Menyu",         callback_data="main_menu")],
-                ])
-            )
-        return
-
-    wait_msg = await update.message.reply_text(
-        f"Rasm tavsifi tayyorlanmoqda... ({used+1}/{limit})\n(10-30 soniya)"
-    )
-
-    try:
-        await update.message.chat.send_action(ChatAction.TYPING)
-    except Exception:
-        pass
-
-    enhanced_prompt = await grok_single(
-        f"Make this image prompt more detailed and vivid for DALL-E (keep under 100 words): {prompt}",
-        "You are an expert at writing image generation prompts. Return ONLY the improved prompt, nothing else."
-    )
-    if any(enhanced_prompt.startswith(x) for x in ("Grok", "So'rov")):
-        enhanced_prompt = prompt
-
-    try:
-        await wait_msg.delete()
-    except Exception:
-        pass
-
-    db_inc_image(user.id)
-    try:
-        conn = get_db()
-        conn.execute("INSERT INTO images (user_id, prompt) VALUES (?,?)", (user.id, prompt[:500]))
-        conn.commit()
-        conn.close()
-    except Exception:
-        pass
-
-    await update.message.reply_text(
-        f"Rasm tavsifi tayyor!\n\n"
-        f"Sizning sorovingiz:\n{prompt}\n\n"
-        f"Yaxshilangan tavsif:\n{enhanced_prompt}\n\n"
-        f"Foydalanilgan: {used+1}/{limit} ta\n\n"
-        f"Bu tavsifni DALL-E, Midjourney yoki boshqa rasm generatorda ishlating!",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("Yana rasm", callback_data="image_mode")],
-            [InlineKeyboardButton("Menyu",     callback_data="main_menu")],
-        ])
-    )
-
-
-async def _submit_premium_request(update: Update, ctx: ContextTypes.DEFAULT_TYPE, msg: str):
-    user    = update.effective_user
-    req_id  = db_add_premium_request(user.id, msg[:500])
-    payment = db_get("premium_payment_info")
-
-    await update.message.reply_text(
-        f"Sorovingiz qabul qilindi!\n\n"
-        f"Sorov raqami: #{req_id}\n\n"
-        f"{payment}\n\n"
-        f"Tolovdan song admin tekshiradi va premium aktivlanadi.",
-        reply_markup=kb_back()
-    )
-
-    name  = user.full_name or user.username or str(user.id)
-    uname = f"@{user.username}" if user.username else "username yoq"
-    for admin_id in ADMIN_IDS:
+# ═══════════════════════════════════════════════════
+def vip_badge(vip):
+    if vip == 'vip':     return "👑"
+    if vip == 'premium': return "⭐"
+    return "👤"
+
+def get_main_kb(uid, vip=None):
+    b = ReplyKeyboardBuilder()
+    b.button(text="🎬 Kinolar Ro'yxati")
+    b.button(text="🎟 Kino Sotib Olish")
+    b.button(text="💰 Hisobim")
+    b.button(text="🎁 Kunlik Bonus")
+    b.button(text="👥 Do'st Taklif")
+    b.button(text="🤖 AI Suhbat")
+    b.button(text="✍️ Adminga Yozish")
+    b.button(text="👑 VIP / Premium")
+    if uid == ADMIN_ID:
+        b.button(text="🛠 Admin Panel")
+        b.button(text="📊 Statistika")
+    b.adjust(2)
+    return b.as_markup(resize_keyboard=True)
+
+def get_admin_kb():
+    b = InlineKeyboardBuilder()
+    b.button(text="➕ Kino Qo'shish",         callback_data="adm_add_kino")
+    b.button(text="🗑 Kino O'chirish",         callback_data="adm_del_kino")
+    b.button(text="💰 Coin Qo'shish",          callback_data="adm_add_coin")
+    b.button(text="💸 Coin Olish",             callback_data="adm_rm_coin")
+    b.button(text="👑 VIP Berish",             callback_data="adm_give_vip")
+    b.button(text="📢 Reklama",                callback_data="adm_broadcast")
+    b.button(text="🚫 Bloklash",               callback_data="adm_ban")
+    b.button(text="✅ Blokdan Chiqarish",       callback_data="adm_unban")
+    b.button(text="💬 Foydalanuvchi bilan Chat",callback_data="adm_start_chat")
+    b.button(text="📞 Qo'ng'iroq",             callback_data="adm_call_user")
+    b.button(text="📊 To'liq Statistika",      callback_data="adm_full_stats")
+    b.button(text="🔔 Majburiy Obuna",         callback_data="adm_subscription")
+    b.button(text="👥 Foydalanuvchilar",       callback_data="adm_users")
+    b.button(text="📋 Obuna Loglari",          callback_data="adm_sub_logs")
+    b.button(text="🤖 AI Sozlamalari",         callback_data="adm_ai_settings")
+    b.button(text="❌ Yopish",                  callback_data="adm_close")
+    b.adjust(2)
+    return b.as_markup()
+
+def get_vip_buy_kb():
+    b = InlineKeyboardBuilder()
+    for k, p in VIP_PLANS.items():
+        b.button(text=f"{p['name']}  —  {p['coins']} coin", callback_data=f"vip_buy_{k}")
+    b.button(text="❌ Yopish", callback_data="adm_close")
+    b.adjust(1)
+    return b.as_markup()
+
+def get_end_chat_kb():
+    b = InlineKeyboardBuilder()
+    b.button(text="🔴 Aloqani Tugatish", callback_data="end_chat")
+    return b.as_markup()
+
+# ═══════════════════════════════════════════════════
+#  FSM
+# ═══════════════════════════════════════════════════
+class S(StatesGroup):
+    reg_name   = State()
+    reg_phone  = State()
+    admin_auth = State()
+    kino_info  = State()
+    kino_file  = State()
+    buy_movie  = State()
+    broadcast  = State()
+    ban_id     = State()
+    unban_id   = State()
+    chat_target= State()
+    active_chat= State()
+    coin_add_id= State(); coin_add_amt= State()
+    coin_rm_id = State(); coin_rm_amt = State()
+    sub_link   = State(); sub_title   = State()
+    call_id    = State()
+    ai_chat    = State()
+    vip_give_id= State()
+
+# ═══════════════════════════════════════════════════
+#  HANDLERS — START
+# ═══════════════════════════════════════════════════
+@dp.message(CommandStart())
+async def cmd_start(m: Message, state: FSMContext):
+    await state.clear()
+    u = await get_user(m.from_user.id)
+    ref_id = None
+    args = m.text.split()
+    if len(args) > 1 and args[1].startswith("ref"):
         try:
-            await ctx.bot.send_message(
-                admin_id,
-                f"Yangi Premium sorov!\n\n"
-                f"Foydalanuvchi: {name}\n"
-                f"{uname}\n"
-                f"ID: {user.id}\n"
-                f"Sorov #{req_id}\n\n"
-                f"Xabar: {msg}\n\n"
-                f"Tasdiqlash uchun admin panelga kiring.",
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton(
-                            f"Tasdiqlash #{req_id}",
-                            callback_data=f"adm_approve_req_{req_id}_{user.id}"
-                        ),
-                        InlineKeyboardButton(
-                            "Rad etish",
-                            callback_data=f"adm_reject_req_{req_id}_{user.id}"
-                        ),
-                    ]
-                ])
-            )
-        except Exception:
-            pass
+            ref_id = int(args[1][3:])
+            if ref_id == m.from_user.id: ref_id = None
+        except: pass
+    if u:
+        if u['is_banned']:
+            return await m.answer("🚫 Siz botdan bloklangansiz.")
+        ns = await check_all_subs(m.from_user.id, u['name'])
+        if ns: return await send_sub_msg(m.from_user.id, ns)
+        vip = await get_vip_status(m.from_user.id)
+        badge = vip_badge(vip)
+        vip_txt = f"\n{'👑 VIP' if vip=='vip' else '⭐ Premium'} aktiv ✅" if vip else ""
+        return await m.answer(
+            f"🎬 *Xush kelibsiz, {badge} {u['name']}!*\n💰 Balans: *{u['coins']} coin*{vip_txt}\n🤖 AI Suhbat — kino haqida hamma narsani so'rang!",
+            reply_markup=get_main_kb(m.from_user.id, vip), parse_mode="Markdown")
+    await state.update_data(ref_id=ref_id)
+    await m.answer("👋 *CineBot 2026 ga xush kelibsiz!*\n🎬 Kinolar | 🤖 AI | 👑 VIP\n\nIsmingizni kiriting:", parse_mode="Markdown")
+    await state.set_state(S.reg_name)
 
-
-async def _check_quiz_answer(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text: str):
-    user   = update.effective_user
-    answer = ctx.user_data.get("quiz_answer", "").lower().strip()
-    ctx.user_data.pop("quiz_waiting", None)
-    ctx.user_data.pop("quiz_answer", None)
-
-    if not answer:
-        return
-
-    user_ans = text.lower().strip()
-    check_prompt = (
-        f"Savol: {ctx.user_data.get('quiz_question','')}\n"
-        f"To'g'ri javob: {answer}\n"
-        f"Foydalanuvchi javobi: {user_ans}\n\n"
-        f"Foydalanuvchi javobi to'g'rimi? Faqat 'HA' yoki 'YOQ' deb javob ber."
-    )
-    check   = await grok_single(check_prompt, "You are a quiz judge. Answer only HA or YOQ.")
-    correct = "HA" in check.upper() or user_ans == answer
-
-    db_update_quiz(user.id, correct)
-    u     = db_get_user(user.id)
-    score = u.get("quiz_score", 0) if u else 0
-    total = u.get("quiz_total", 0) if u else 0
-
-    if correct:
-        text_out = f"Togri!\n\nJavob: {answer}\n\nNatijangiz: {score}/{total}"
+@dp.callback_query(F.data == "check_sub")
+async def check_sub_cb(c: CallbackQuery):
+    await c.answer("⏳ Tekshirilmoqda...")
+    u = await get_user(c.from_user.id)
+    if not u: return await c.message.answer("❌ /start")
+    if u['is_banned']: return await c.message.answer("🚫 Bloklangansiz.")
+    chs = await get_req_channels(); not_sub = []
+    for ch in chs:
+        if is_tg_link(ch['link']): is_sub = await check_tg_sub(c.from_user.id, ch['link'])
+        else: is_sub = True; await set_ext_confirmed(c.from_user.id, ch['id'])
+        await track_sub(c.from_user.id, u['name'], ch, is_sub)
+        if not is_sub: not_sub.append(ch)
+    if not not_sub:
+        try: await c.message.edit_text("✅ <b>Barcha kanallarga a'zo bo'ldingiz!</b>", parse_mode="HTML")
+        except: pass
+        vip = await get_vip_status(c.from_user.id)
+        await bot.send_message(c.from_user.id, f"🎉 <b>Xush kelibsiz, {u['name']}!</b>\n💰 {u['coins']} coin",
+            reply_markup=get_main_kb(c.from_user.id, vip), parse_mode="HTML")
     else:
-        text_out = f"Notogri!\n\nTogri javob: {answer}\n\nNatijangiz: {score}/{total}"
+        lines = "".join(f"{i}. <a href='{ch['link']}'>{ch['title']}</a>\n" for i,ch in enumerate(not_sub,1))
+        txt = f"❌ <b>Hali {len(not_sub)} ta kanalga a'zo bo'lmadingiz:</b>\n\n{lines}\nA'zo bo'lib, <b>✅ Tekshirish</b> tugmasini qayta bosing."
+        try: await c.message.edit_text(txt, reply_markup=build_sub_kb(not_sub), parse_mode="HTML", disable_web_page_preview=True)
+        except: await bot.send_message(c.from_user.id, txt, reply_markup=build_sub_kb(not_sub), parse_mode="HTML", disable_web_page_preview=True)
 
-    await update.message.reply_text(
-        text_out,
-        reply_markup=InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("Yana savol", callback_data="quiz_random"),
-                InlineKeyboardButton("Menyu",      callback_data="main_menu"),
-            ]
-        ])
-    )
+# ═══════════════════════════════════════════════════
+#  RO'YXATDAN O'TISH
+# ═══════════════════════════════════════════════════
+@dp.message(S.reg_name)
+async def reg_name(m: Message, state: FSMContext):
+    if not m.text or len(m.text) < 2: return await m.answer("⚠️ Ism kamida 2 harf!")
+    await state.update_data(name=m.text.strip())
+    kb = ReplyKeyboardBuilder()
+    kb.button(text="📱 Raqamni Yuborish", request_contact=True)
+    kb.button(text="⏭ O'tkazib yuborish")
+    kb.adjust(1)
+    await m.answer("📱 Telefon raqamingizni yuboring:", reply_markup=kb.as_markup(resize_keyboard=True))
+    await state.set_state(S.reg_phone)
 
+async def finish_reg(m: Message, state: FSMContext, name: str, phone=None):
+    data = await state.get_data()
+    await create_user(m.from_user.id, name, phone, data.get('ref_id'))
+    await state.clear()
+    asyncio.create_task(_notify_new_user(m.from_user.id, name, phone, data.get('ref_id')))
+    chs = await get_req_channels()
+    if chs:
+        await m.answer(f"✅ *Tabriklaymiz, {name}!*\n🎉 Ro'yxatdan o'tdingiz!\n💰 *100 coin* sovg'a!\n\n⚠️ Kanallarga a'zo bo'ling:",
+            parse_mode="Markdown", reply_markup=ReplyKeyboardRemove())
+        ns = await check_all_subs(m.from_user.id, name)
+        if ns: await send_sub_msg(m.from_user.id, ns)
+    else:
+        await m.answer(f"✅ *Tabriklaymiz, {name}!*\n🎉 Ro'yxatdan o'tdingiz!\n💰 *100 coin* sovg'a!\n🤖 AI Suhbat orqali kino haqida so'rang!",
+            reply_markup=get_main_kb(m.from_user.id), parse_mode="Markdown")
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  CALLBACK HANDLERI
-# ══════════════════════════════════════════════════════════════════════════════
+async def _notify_new_user(uid, name, phone, ref_id):
+    try:
+        async with db_pool.acquire() as conn:
+            total = await conn.fetchval("SELECT COUNT(*) FROM users")
+        ref_txt = f"\n👥 Taklif: <code>{ref_id}</code>" if ref_id else ""
+        ph_txt  = f"\n📱 {phone}" if phone else ""
+        await bot.send_message(ADMIN_ID,
+            f"🆕 <b>Yangi foydalanuvchi!</b>\n👤 <b>{name}</b>\n🔑 <code>{uid}</code>{ph_txt}{ref_txt}\n📊 Jami: <b>{total}</b>",
+            parse_mode="HTML")
+    except: pass
 
-async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+@dp.message(S.reg_phone, F.contact)
+async def reg_phone(m: Message, state: FSMContext):
+    data = await state.get_data()
+    await finish_reg(m, state, data['name'], m.contact.phone_number)
 
-    data    = query.data
-    user    = update.effective_user
-    db_upsert_user(user.id, user.username or "", user.full_name or "")
-    is_prem = db_is_premium(user.id)
+@dp.message(S.reg_phone, F.text == "⏭ O'tkazib yuborish")
+async def reg_skip(m: Message, state: FSMContext):
+    data = await state.get_data()
+    await finish_reg(m, state, data['name'])
 
-    if data == "main_menu":
-        await query.edit_message_text("Asosiy menyu:", reply_markup=kb_main(is_prem))
+# ═══════════════════════════════════════════════════
+#  🤖 AI SUHBAT
+# ═══════════════════════════════════════════════════
+@dp.message(F.text == "🤖 AI Suhbat")
+async def ai_chat_menu(m: Message, state: FSMContext):
+    if not await sub_guard(m): return
+    u = await get_user(m.from_user.id)
+    if not u: return await m.answer("❌ /start")
+    vip = await get_vip_status(m.from_user.id)
+    can, used, limit = await check_ai_limit(m.from_user.id)
+    badge = vip_badge(vip)
+    vip_lbl = "VIP 👑" if vip=='vip' else ("Premium ⭐" if vip=='premium' else "Oddiy")
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🗑 Xotirani Tozalash", callback_data="ai_clear")
+    kb.button(text="❌ Chiqish",            callback_data="ai_exit")
+    kb.adjust(2)
+    await m.answer(
+        f"🤖 *Gemini AI Suhbat*\n━━━━━━━━━━━━━━━━\n\n"
+        f"{badge} Daraja: *{vip_lbl}*\n📊 Bugun: *{used}/{limit}* so'rov\n\n"
+        f"💬 Kino haqida so'rang:\n• Kino tavsiya\n• Kino ma'lumoti\n• Aktyorlar, rejissyor\n• Janr bo'yicha qidirish\n\n"
+        f"Tugash: /stop yoki ❌ Chiqish",
+        parse_mode="Markdown", reply_markup=kb.as_markup())
+    await state.set_state(S.ai_chat)
+
+@dp.callback_query(F.data == "ai_clear")
+async def ai_clear_cb(c: CallbackQuery):
+    await c.answer()
+    await clear_ai_context(c.from_user.id)
+    await c.message.answer("🗑 *AI xotirasi tozalandi!*", parse_mode="Markdown")
+
+@dp.callback_query(F.data == "ai_exit")
+async def ai_exit_cb(c: CallbackQuery, state: FSMContext):
+    await c.answer()
+    await state.clear()
+    vip = await get_vip_status(c.from_user.id)
+    await c.message.answer("👋 AI suhbatdan chiqdingiz.", reply_markup=get_main_kb(c.from_user.id, vip))
+
+@dp.message(S.ai_chat)
+async def ai_chat_process(m: Message, state: FSMContext):
+    if m.text and m.text.lower() == "/stop":
+        await state.clear()
+        vip = await get_vip_status(m.from_user.id)
+        return await m.answer("👋 AI suhbatdan chiqdingiz.", reply_markup=get_main_kb(m.from_user.id, vip))
+    if not m.text: return await m.answer("⚠️ Faqat matn yuboring!")
+    can, used, limit = await check_ai_limit(m.from_user.id)
+    if not can:
+        vip = await get_vip_status(m.from_user.id)
+        kb = InlineKeyboardBuilder()
+        kb.button(text="👑 VIP / Premium Olish", callback_data="open_vip")
+        kb.adjust(1)
+        return await m.answer(
+            f"❌ *Kunlik limit tugadi!* ({used}/{limit})\n\n"
+            f"⭐ Premium: {AI_PREMIUM_LIMIT} ta/kun\n👑 VIP: Cheksiz",
+            parse_mode="Markdown", reply_markup=kb.as_markup())
+    thinking = await m.answer("🤖 *AI o'ylayapti...*", parse_mode="Markdown")
+    answer = await ask_gemini(m.from_user.id, m.text)
+    await increment_ai(m.from_user.id)
+    _, used2, lim2 = await check_ai_limit(m.from_user.id)
+    try: await thinking.delete()
+    except: pass
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🗑 Xotira Tozalash", callback_data="ai_clear")
+    kb.button(text="❌ Chiqish",          callback_data="ai_exit")
+    kb.adjust(2)
+    await m.answer(f"🤖 {answer}\n\n─────────\n📊 {used2}/{lim2} so'rov", reply_markup=kb.as_markup())
+
+@dp.callback_query(F.data == "open_vip")
+async def open_vip_cb(c: CallbackQuery):
+    await c.answer()
+    u = await get_user(c.from_user.id)
+    await c.message.answer(
+        f"👑 *VIP / Premium*\n━━━━━━━━━━━━━━━━\n\n💰 Balans: *{u['coins']} coin*\n\n"
+        f"⭐ Premium: {AI_PREMIUM_LIMIT} ta AI so'rov/kun\n"
+        f"👑 VIP: Cheksiz AI so'rov\n\nRejan tanlang:",
+        parse_mode="Markdown", reply_markup=get_vip_buy_kb())
+
+# ═══════════════════════════════════════════════════
+#  VIP / PREMIUM
+# ═══════════════════════════════════════════════════
+@dp.message(F.text == "👑 VIP / Premium")
+async def vip_page(m: Message):
+    if not await sub_guard(m): return
+    u = await get_user(m.from_user.id)
+    if not u: return await m.answer("❌ /start")
+    vip = await get_vip_status(m.from_user.id)
+    vip_info = ""
+    if vip:
+        exp = u['vip_expires'].strftime("%d.%m.%Y %H:%M") if u['vip_expires'] else "Muddatsiz"
+        vip_info = f"\n✅ Sizda: *{'VIP 👑' if vip=='vip' else 'Premium ⭐'}* — {exp} gacha\n"
+    await m.answer(
+        f"👑 *VIP / Premium*\n━━━━━━━━━━━━━━━━\n💰 Balans: *{u['coins']} coin*{vip_info}\n\n"
+        f"⭐ *Premium:*\n• 🤖 AI: {AI_PREMIUM_LIMIT} ta so'rov/kun\n• Kunlik bonus: +30 coin\n\n"
+        f"👑 *VIP:*\n• 🤖 AI: Cheksiz ({AI_VIP_LIMIT} ta/kun)\n• Kunlik bonus: +50 coin\n\nRejan tanlang:",
+        parse_mode="Markdown", reply_markup=get_vip_buy_kb())
+
+@dp.callback_query(F.data.startswith("vip_buy_"))
+async def vip_buy(c: CallbackQuery):
+    await c.answer()
+    plan_key = c.data[8:]
+    plan = VIP_PLANS.get(plan_key)
+    if not plan: return await c.message.answer("❌ Noma'lum plan!")
+    u = await get_user(c.from_user.id)
+    kb = InlineKeyboardBuilder()
+    kb.button(text=f"✅ Ha, {plan['coins']} coin to'layman", callback_data=f"vip_confirm_{plan_key}")
+    kb.button(text="❌ Bekor", callback_data="adm_close")
+    kb.adjust(1)
+    await c.message.answer(
+        f"💳 *Tasdiqlash*\n\n📦 {plan['name']}\n💰 Narx: *{plan['coins']} coin*\n💳 Sizda: *{u['coins']} coin*\n\nTasdiqlaysizmi?",
+        parse_mode="Markdown", reply_markup=kb.as_markup())
+
+@dp.callback_query(F.data.startswith("vip_confirm_"))
+async def vip_confirm(c: CallbackQuery):
+    await c.answer()
+    plan_key = c.data[12:]
+    ok, result = await buy_vip_coins(c.from_user.id, plan_key)
+    plan = VIP_PLANS.get(plan_key)
+    if ok:
+        exp = result.strftime("%d.%m.%Y %H:%M")
+        await c.message.edit_text(f"🎉 *{plan['name']} aktivlashtirildi!*\n⏰ {exp} gacha\n🤖 AI limiti yangilandi! 🚀", parse_mode="Markdown")
+        u = await get_user(c.from_user.id)
+        vip = await get_vip_status(c.from_user.id)
+        await bot.send_message(c.from_user.id, f"✅ *{plan['name']}* faollashdi!\n💰 Qolgan balans: *{u['coins']} coin*",
+            reply_markup=get_main_kb(c.from_user.id, vip), parse_mode="Markdown")
+        try:
+            await bot.send_message(ADMIN_ID,
+                f"💳 <b>VIP sotildi!</b>\n👤 <b>{u['name']}</b> (<code>{c.from_user.id}</code>)\n📦 {plan['name']}\n💰 {plan['coins']} coin",
+                parse_mode="HTML")
+        except: pass
+    else:
+        await c.message.edit_text(f"❌ *Xato:* {result}", parse_mode="Markdown")
+
+# ═══════════════════════════════════════════════════
+#  KINOLAR
+# ═══════════════════════════════════════════════════
+@dp.message(F.text == "🎬 Kinolar Ro'yxati")
+async def show_movies(m: Message):
+    if not await sub_guard(m): return
+    movies = await get_all_movies()
+    if not movies: return await m.answer("📽 Hozircha kinolar mavjud emas.")
+    text = "🔥 *KINOLAR RO'YXATI*\n━━━━━━━━━━━━━━━━━━━━\n\n"
+    for mv in movies:
+        gn = f" | 🎭 {mv['genre']}" if mv.get('genre') else ""
+        text += f"🎬 *{mv['name']}*\n📅 {mv['year']}{gn}\n💎 *{mv['price']} coin* | 🆔 Kod: `{mv['id']}`\n────────────────────\n"
+    text += "\n🍿 Sotib olish: 🎟 *Kino Sotib Olish*"
+    await m.answer(text, parse_mode="Markdown")
+
+@dp.message(F.text == "🎟 Kino Sotib Olish")
+async def buy_movie_start(m: Message, state: FSMContext):
+    if not await sub_guard(m): return
+    u = await get_user(m.from_user.id)
+    if not u: return await m.answer("❌ /start")
+    await m.answer(f"💰 Balans: *{u['coins']} coin*\n\n🎬 Kino *kodini* yuboring:", parse_mode="Markdown")
+    await state.set_state(S.buy_movie)
+
+@dp.message(S.buy_movie)
+async def process_buy(m: Message, state: FSMContext):
+    if not m.text or not m.text.isdigit(): return await m.answer("⚠️ Faqat kino kodini raqamda yozing!")
+    mv = await get_movie(int(m.text))
+    if not mv: return await m.answer("❌ Bunday kino topilmadi!")
+    u = await get_user(m.from_user.id)
+    if await user_has_movie(m.from_user.id, mv['id']):
+        await state.clear()
+        await m.answer(f"✅ *{mv['name']}* allaqachon sotib olgansiz!", parse_mode="Markdown")
+        if mv['file_id']: await bot.send_video(m.from_user.id, mv['file_id'], caption=f"🎬 {mv['name']}")
         return
+    if u['coins'] < mv['price']:
+        await state.clear()
+        return await m.answer(f"❌ *Coinlar yetarli emas!*\n💎 Narx: {mv['price']}\n💰 Sizda: {u['coins']}", parse_mode="Markdown")
+    gn = f"\n🎭 Janr: {mv['genre']}" if mv.get('genre') else ""
+    kb = InlineKeyboardBuilder()
+    kb.button(text=f"✅ Ha, {mv['price']} coin to'layman", callback_data=f"buy_{mv['id']}")
+    kb.button(text="❌ Bekor", callback_data="cancel_buy")
+    kb.adjust(1)
+    await m.answer(
+        f"🎬 *{mv['name']}* ({mv['year']}){gn}\n\n📝 {mv['description'] or 'Tavsif yo\'q'}\n\n"
+        f"💎 Narx: *{mv['price']} coin* | 💰 Sizda: *{u['coins']} coin*\n\nTasdiqlaysizmi?",
+        reply_markup=kb.as_markup(), parse_mode="Markdown")
+    await state.clear()
 
-    if data == "chat_start":
-        ctx.user_data.pop("chat_mode", None)
-        await query.edit_message_text(
-            "Grok bilan suhbat\n\nSavolingizni yozing. Men javob beraman!\n(Tarix avtomatik saqlanadi)",
-            reply_markup=kb_back()
-        )
-        return
+@dp.callback_query(F.data.startswith("buy_"))
+async def confirm_buy(c: CallbackQuery):
+    await c.answer()
+    mid = int(c.data[4:])
+    mv = await get_movie(mid)
+    ok = await buy_movie_db(c.from_user.id, mid, mv['price'])
+    if ok:
+        await c.message.edit_text(f"✅ *{mv['name']}* sotib olindi!", parse_mode="Markdown")
+        if mv['file_id']: await bot.send_video(c.from_user.id, mv['file_id'], caption=f"🎬 {mv['name']}")
+        else: await c.message.answer("⚠️ Kino fayli hali qo'shilmagan.")
+    else:
+        await c.message.edit_text("❌ Xatolik yuz berdi!")
 
-    if data in ("image_mode", "image_hd"):
-        if db_get("image_enabled") == "0":
-            await query.edit_message_text("Rasm yaratish hozirda ochiq.", reply_markup=kb_back())
-            return
-        used  = db_get_image_count(user.id)
-        limit = PREMIUM_IMAGE_LIMIT if is_prem else FREE_IMAGE_LIMIT
-        ctx.user_data["image_mode"] = True
-        await query.edit_message_text(
-            f"Rasm yaratish\n\n"
-            f"Foydalanilgan: {used}/{limit} ta\n\n"
-            f"Rasmni tasvirlab yozing:\n"
-            f"Misol: A futuristic city at night, colorful, detailed\n\n"
-            f"Tavsifingizni yozing:",
-            reply_markup=kb_back()
-        )
-        return
+@dp.callback_query(F.data == "cancel_buy")
+async def cancel_buy(c: CallbackQuery):
+    await c.answer()
+    await c.message.edit_text("❌ Bekor qilindi.")
 
-    if data == "quiz_menu":
-        await query.edit_message_text(
-            "Quiz — Bilimingizni sinang!\n\nMavzu tanlang:",
-            reply_markup=kb_quiz_menu()
-        )
-        return
+# ═══════════════════════════════════════════════════
+#  HISOBIM
+# ═══════════════════════════════════════════════════
+@dp.message(F.text == "💰 Hisobim")
+async def my_account(m: Message):
+    if not await sub_guard(m): return
+    u = await get_user(m.from_user.id)
+    if not u: return await m.answer("❌ /start")
+    async with db_pool.acquire() as conn:
+        p_cnt = await conn.fetchval("SELECT COUNT(*) FROM purchases WHERE user_id=$1", m.from_user.id)
+        r_cnt = await conn.fetchval("SELECT COUNT(*) FROM users WHERE referrer_id=$1", m.from_user.id)
+        p_num = await conn.fetchval("SELECT COUNT(*) FROM users WHERE user_id<=$1", m.from_user.id)
+    vip = await get_vip_status(m.from_user.id)
+    badge = vip_badge(vip)
+    vip_line = ""
+    if vip:
+        exp = u['vip_expires'].strftime("%d.%m.%Y") if u['vip_expires'] else "Muddatsiz"
+        vip_line = f"\n{'👑 VIP' if vip=='vip' else '⭐ Premium'}: *{exp}* gacha"
+    _, used, limit = await check_ai_limit(m.from_user.id)
+    await m.answer(
+        f"{badge} *Shaxsiy Kabinet*\n━━━━━━━━━━━━━━━━━━\n\n"
+        f"📛 Ism: *{u['name']}*\n📱 Tel: {u['phone'] or 'Kiritilmagan'}\n"
+        f"💰 Balans: *{u['coins']} coin*{vip_line}\n"
+        f"🤖 AI bugun: *{used}/{limit}*\n"
+        f"🎬 Sotib olingan: *{p_cnt}* ta\n👥 Taklif: *{r_cnt}* ta\n"
+        f"📅 Ro'yxatdan: *{u['joined_at']}*\n\n"
+        f"🔑 ID: `{m.from_user.id}` | 🏷 Profil №{p_num}",
+        parse_mode="Markdown")
 
-    if data.startswith("quiz_topic_") or data == "quiz_random":
-        topic = data.replace("quiz_topic_", "") if data != "quiz_random" else random.choice(QUIZ_TOPICS)
-        await query.edit_message_text(f"{topic} — savol tayyorlanmoqda...")
-        question = await grok_single(
-            f"'{topic}' mavzusida qiziqarli bir savol ber. "
-            f"Format: SAVOL: [savol matni]\nJAVOB: [togri javob]\n"
-            f"Faqat shu formatda yaz, boshqa narsa yozma.",
-            "You are a quiz master. Follow the format exactly."
-        )
-        lines  = question.strip().split("\n")
-        q_text = ""
-        a_text = ""
-        for line in lines:
-            if line.upper().startswith("SAVOL:"):
-                q_text = line.split(":", 1)[1].strip()
-            elif line.upper().startswith("JAVOB:"):
-                a_text = line.split(":", 1)[1].strip()
-        if not q_text:
-            q_text = question
-            a_text = "-"
+# ═══════════════════════════════════════════════════
+#  KUNLIK BONUS
+# ═══════════════════════════════════════════════════
+@dp.message(F.text == "🎁 Kunlik Bonus")
+async def daily_bonus(m: Message):
+    if not await sub_guard(m): return
+    u = await get_user(m.from_user.id)
+    if not u: return await m.answer("❌ /start")
+    today = date.today()
+    if u['last_bonus'] and u['last_bonus'] >= today:
+        return await m.answer("⏳ *Bugun allaqachon bonus oldingiz!*\n\n🔄 Ertaga qaytib keling!", parse_mode="Markdown")
+    vip = await get_vip_status(m.from_user.id)
+    bonus = 50 if vip=='vip' else (30 if vip=='premium' else 20)
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE users SET coins=coins+$1,last_bonus=CURRENT_DATE WHERE user_id=$2", bonus, m.from_user.id)
+    updated = await get_user(m.from_user.id)
+    extra = " (VIP 👑)" if vip=='vip' else (" (Premium ⭐)" if vip=='premium' else "")
+    await m.answer(f"🎉 *Kunlik Bonus!*\n\n✅ *+{bonus} coin*{extra}\n💰 Balans: *{updated['coins']} coin*", parse_mode="Markdown")
 
-        ctx.user_data["quiz_waiting"]  = True
-        ctx.user_data["quiz_answer"]   = a_text.lower()
-        ctx.user_data["quiz_question"] = q_text
+# ═══════════════════════════════════════════════════
+#  DO'ST TAKLIF
+# ═══════════════════════════════════════════════════
+@dp.message(F.text == "👥 Do'st Taklif")
+async def referral(m: Message):
+    if not await sub_guard(m): return
+    bi = await bot.get_me()
+    link = f"https://t.me/{bi.username}?start=ref{m.from_user.id}"
+    async with db_pool.acquire() as conn:
+        cnt = await conn.fetchval("SELECT COUNT(*) FROM users WHERE referrer_id=$1", m.from_user.id)
+    await m.answer(f"👥 *Do'stlarni Taklif*\n━━━━━━━━━━━━━━━━━━\n\n🔗 Havola:\n`{link}`\n\n💰 Har do'st: *+50 coin*\n👤 Taklif qilingan: *{cnt}* ta", parse_mode="Markdown")
 
-        await query.edit_message_text(
-            f"Quiz — {topic}\n\n{q_text}\n\nJavobingizni yozing:",
-            reply_markup=kb_back()
-        )
-        return
+# ═══════════════════════════════════════════════════
+#  ADMINGA YOZISH
+# ═══════════════════════════════════════════════════
+@dp.message(F.text == "✍️ Adminga Yozish")
+async def write_admin(m: Message, state: FSMContext):
+    if not await sub_guard(m): return
+    u = await get_user(m.from_user.id)
+    if not u: return await m.answer("❌ /start")
+    await state.set_state(S.active_chat)
+    await state.update_data(chat_with=ADMIN_ID, is_user=True)
+    await m.answer("✍️ *Adminga xabar yozing:*\n\nTugash: /stop", parse_mode="Markdown", reply_markup=ReplyKeyboardRemove())
+    try:
+        await bot.send_message(ADMIN_ID, f"📩 <b>Yangi xabar!</b>\n👤 <b>{u['name']}</b> | ID: <code>{m.from_user.id}</code>", parse_mode="HTML")
+    except: pass
 
-    if data == "quiz_stats":
-        u     = db_get_user(user.id)
-        score = u.get("quiz_score", 0) if u else 0
-        total = u.get("quiz_total", 0) if u else 0
-        pct   = int(score / total * 100) if total > 0 else 0
-        await query.edit_message_text(
-            f"Quiz natijalaringiz\n\nTogri: {score}\nJami: {total}\nFoiz: {pct}%",
-            reply_markup=kb_back("quiz_menu", "Quiz menyusi")
-        )
-        return
-
-    if data == "translate_menu":
-        await query.edit_message_text(
-            "Tarjima\n\nQaysi tilga tarjima qilmoqchisiz?",
-            reply_markup=kb_translate()
-        )
-        return
-
-    if data.startswith("trans_"):
-        lang = data[6:]
-        ctx.user_data["chat_mode"]  = "translate"
-        ctx.user_data["trans_lang"] = lang
-        lang_label = next((k for k, v in TRANSLATE_LANGS if v == lang), lang)
-        await query.edit_message_text(
-            f"{lang_label} tiliga tarjima\n\nMatingizni yozing:",
-            reply_markup=kb_back("translate_menu")
-        )
-        return
-
-    if data == "analyze_menu":
-        await query.edit_message_text("Matn tahlil\n\nQanday tahlil kerak?", reply_markup=kb_analyze())
-        return
-
-    for anal_type in ("grammar", "summary", "sentiment", "keywords", "rewrite", "improve"):
-        if data == f"anal_{anal_type}":
-            labels = {
-                "grammar":   "Grammatika tekshirish",
-                "summary":   "Xulosa chiqarish",
-                "sentiment": "Tuygu tahlili",
-                "keywords":  "Kalit sozlar",
-                "rewrite":   "Qayta yozish",
-                "improve":   "Yaxshilash",
-            }
-            ctx.user_data["chat_mode"] = f"anal_{anal_type}"
-            await query.edit_message_text(
-                f"{labels[anal_type]}\n\nMatingizni yozing:",
-                reply_markup=kb_back("analyze_menu")
-            )
-            return
-
-    if data == "history_menu":
-        history = db_get_history_display(user.id, 8)
-        if not history:
-            await query.edit_message_text("Suhbat tarixi yoq.", reply_markup=kb_back())
-            return
-        lines = ["Oxirgi suhbat\n"]
-        for msg in history:
-            role  = msg["role"]
-            icon  = "[Siz]" if role == "user" else "[Grok]"
-            short = msg["content"][:120]
-            if len(msg["content"]) > 120:
-                short += "..."
-            t = msg.get("created_at", "")[:16]
-            lines.append(f"{icon} {t}\n{short}\n")
-        await query.edit_message_text("\n".join(lines), reply_markup=kb_history())
-        return
-
-    if data == "hist_view":
-        history = db_get_history_display(user.id, 8)
-        if not history:
-            await query.edit_message_text("Suhbat tarixi yoq.", reply_markup=kb_back())
-            return
-        lines = ["Oxirgi suhbat\n"]
-        for msg in history:
-            role  = msg["role"]
-            icon  = "[Siz]" if role == "user" else "[Grok]"
-            short = msg["content"][:120]
-            if len(msg["content"]) > 120:
-                short += "..."
-            t = msg.get("created_at", "")[:16]
-            lines.append(f"{icon} {t}\n{short}\n")
-        await query.edit_message_text("\n".join(lines), reply_markup=kb_history())
-        return
-
-    if data == "hist_clear_confirm":
-        await query.edit_message_text(
-            "Suhbat tarixini ochirmoqchimisiz?",
-            reply_markup=kb_confirm("do_clear_hist", "Ha, ochirish")
-        )
-        return
-
-    if data == "confirm_do_clear_hist":
-        db_clear_history(user.id)
-        await query.edit_message_text("Suhbat tarixi ochirildi.", reply_markup=kb_back())
-        return
-
-    if data == "profile":
-        u      = db_get_user(user.id)
-        used   = db_get_image_count(user.id)
-        limit  = PREMIUM_IMAGE_LIMIT if is_prem else FREE_IMAGE_LIMIT
-        prem_s = "Premium" if is_prem else "Oddiy"
-        prem_e = u.get("premium_expires", "")[:16] if u and is_prem else "-"
-        score  = u.get("quiz_score", 0) if u else 0
-        qtotal = u.get("quiz_total", 0) if u else 0
-        msgs   = u.get("total_msgs", 0) if u else 0
-        joined = u.get("joined_at", "")[:10] if u else "-"
-
-        await query.edit_message_text(
-            f"Profiling\n\n"
-            f"ID: {user.id}\n"
-            f"Ism: {user.full_name or '-'}\n"
-            f"Username: @{user.username or '-'}\n"
-            f"Holat: {prem_s}\n"
-            f"Premium tugash: {prem_e}\n\n"
-            f"Statistika:\n"
-            f"Xabarlar: {msgs}\n"
-            f"Rasmlar: {used}/{limit}\n"
-            f"Quiz: {score}/{qtotal}\n"
-            f"Qoshilgan: {joined}",
-            reply_markup=kb_back()
-        )
-        return
-
-    if data == "buy_premium":
-        price_uzs = db_get("premium_price_uzs", str(PREMIUM_PRICE_UZS))
-        price_usd = db_get("premium_price_usd", str(PREMIUM_PRICE_USD))
-        await query.edit_message_text(
-            f"Premium obuna\n\n"
-            f"Narxi: {price_uzs} som / ${price_usd}\n"
-            f"Muddat: 30 kun\n\n"
-            f"Imtiyozlari:\n"
-            f"- {PREMIUM_IMAGE_LIMIT} ta rasm (oddiy: {FREE_IMAGE_LIMIT} ta)\n"
-            f"- Kod yozish\n"
-            f"- Email yozish\n"
-            f"- Kontent yaratish\n"
-            f"- Chuqur tahlil\n"
-            f"- Biznes maslahat\n"
-            f"- CV / Rezyume\n"
-            f"- Ko'p til tarjima\n",
-            reply_markup=kb_buy_premium()
-        )
-        return
-
-    if data == "prem_benefits":
-        await query.edit_message_text(
-            f"Premium imtiyozlari batafsil\n\n"
-            f"Rasm yaratish: {PREMIUM_IMAGE_LIMIT} ta (oddiy {FREE_IMAGE_LIMIT} ta)\n\n"
-            f"Kod yozish: Python, JS va boshqalar\n\n"
-            f"Email/Xat: Professional xatlar\n\n"
-            f"Kontent: Blog, post, maqola\n\n"
-            f"Chuqur tahlil: Matn, hujjat\n\n"
-            f"Biznes: Strategiya, marketing\n\n"
-            f"O'qish: Dars rejasi\n\n"
-            f"CV/Rezyume: Professional hujjat\n\n"
-            f"Ko'p til: Bir vaqtda 3 tilga",
-            reply_markup=kb_buy_premium()
-        )
-        return
-
-    if data == "prem_request":
-        ctx.user_data["prem_req_mode"] = True
-        payment = db_get("premium_payment_info")
-        await query.edit_message_text(
-            f"Premium sotib olish\n\n"
-            f"{payment}\n\n"
-            f"Tolov haqida xabar yozing (masalan: tolov raqami, vaqti):",
-            reply_markup=kb_back()
-        )
-        return
-
-    if data == "premium_features":
-        if not is_prem:
-            await query.edit_message_text(
-                "Bu funksiya faqat premium foydalanuvchilar uchun!",
-                reply_markup=kb_buy_premium()
-            )
-            return
-        await query.edit_message_text(
-            "Premium funksiyalar\n\nNimani qilmoqchisiz?",
-            reply_markup=kb_premium_features()
-        )
-        return
-
-    prem_modes = {
-        "code_mode": "Kod yozish",
-        "email_mode": "Email yozish",
-        "content_mode": "Kontent yaratish",
-        "deep_analyze": "Chuqur tahlil",
-        "multi_translate": "Kop til tarjima",
-        "business_advice": "Biznes maslahat",
-        "study_plan": "Oquish rejasi",
-        "goal_plan": "Maqsad rejasi",
-        "debate_mode": "Debat",
-        "cv_mode": "CV / Rezyume",
-        "calc_mode": "Murakkab hisob",
-    }
-    if data in prem_modes:
-        if not is_prem:
-            await query.edit_message_text(
-                "Bu funksiya faqat premium foydalanuvchilar uchun!",
-                reply_markup=kb_buy_premium()
-            )
-            return
-        ctx.user_data["chat_mode"] = data
-        await query.edit_message_text(
-            f"{prem_modes[data]}\n\nSorovingizni yozing:",
-            reply_markup=kb_back("premium_features")
-        )
-        return
-
-    if data == "help_menu":
-        await query.edit_message_text(
-            "Yordam\n\n"
-            "Grok — xAI ning kuchli AI modeli\n\n"
-            "Asosiy funksiyalar:\n"
-            "- Suhbat — istalgan savol\n"
-            "- Rasm — AI tavsif yaratish\n"
-            "- Quiz — bilim sinash\n"
-            "- Tarjima — 8 ta til\n"
-            "- Tahlil — matn tahlili\n\n"
-            "Buyruqlar:\n"
-            "/start /menu /premium /help /admin\n\n"
-            "Premium uchun: /premium",
-            reply_markup=kb_back()
-        )
-        return
-
-    if data.startswith("adm_") or data == "adm_main":
-        await _handle_admin_cb(update, ctx, data)
-        return
-
-    if data.startswith("adm_approve_req_") or data.startswith("adm_reject_req_"):
-        if not is_admin(user.id, ctx):
-            await query.answer("Ruxsat yoq!", show_alert=True)
-            return
-        parts    = data.split("_")
-        approved = "approve" in data
-        req_id   = int(parts[3])
-        target   = int(parts[4])
-        db_update_request(req_id, "approved" if approved else "rejected")
-        if approved:
-            db_set_premium(target, True, 30)
-            db_log_admin(user.id, user.full_name or "", "give_premium_req", target, f"req#{req_id}")
+@dp.message(S.active_chat)
+async def active_chat(m: Message, state: FSMContext):
+    if m.text and m.text.lower() == "/stop":
+        data = await state.get_data()
+        partner = data.get("chat_with")
+        is_user = data.get("is_user", True)
+        await state.clear()
+        vip = await get_vip_status(m.from_user.id)
+        await m.answer("📴 Suhbat yakunlandi.", reply_markup=get_main_kb(m.from_user.id, vip))
+        if partner:
             try:
-                await ctx.bot.send_message(
-                    target,
-                    f"Tabriklaymiz!\n\n"
-                    f"Sizga 30 kunlik Premium berildi!\n\n"
-                    f"Barcha premium funksiyalar faollashdi!"
-                )
-            except Exception:
-                pass
-            await query.edit_message_text(f"#{req_id} sorov tasdiqlandi. {target} ga premium berildi.")
-        else:
-            try:
-                await ctx.bot.send_message(target, "Sorovingiz rad etildi.\n\nMuammo bolsa admin bilan boglanin.")
-            except Exception:
-                pass
-            await query.edit_message_text(f"#{req_id} sorov rad etildi.")
+                if is_user: await bot.send_message(partner, f"📴 Foydalanuvchi ({m.from_user.id}) tugatdi.", reply_markup=get_admin_kb())
+                else: await bot.send_message(partner, "📴 Admin suhbatni tugatdi.", reply_markup=get_main_kb(partner))
+            except: pass
         return
+    data = await state.get_data()
+    partner = data.get("chat_with"); is_user = data.get("is_user", True)
+    if not partner: return
+    u = await get_user(m.from_user.id)
+    name = u['name'] if u else m.from_user.full_name
+    prefix = f"📩 *{name}* (`{m.from_user.id}`):\n\n" if is_user else "👑 *Admin:*\n\n"
+    try:
+        if m.text: await bot.send_message(partner, f"{prefix}{m.text}", parse_mode="Markdown")
+        elif m.photo: await bot.send_photo(partner, m.photo[-1].file_id, caption=f"{prefix}{m.caption or ''}", parse_mode="Markdown")
+        elif m.video: await bot.send_video(partner, m.video.file_id, caption=f"{prefix}{m.caption or ''}", parse_mode="Markdown")
+        elif m.document: await bot.send_document(partner, m.document.file_id, caption=f"{prefix}{m.caption or ''}", parse_mode="Markdown")
+        await m.answer("✅ Yuborildi! /stop", reply_markup=get_end_chat_kb() if not is_user else None)
+    except Exception as e:
+        await m.answer(f"❌ Yuborilmadi: {e}")
 
+# ═══════════════════════════════════════════════════
+#  STATISTIKA
+# ═══════════════════════════════════════════════════
+@dp.message(F.text == "📊 Statistika")
+async def stats_msg(m: Message):
+    if m.from_user.id != ADMIN_ID: return
+    s = await get_stats()
+    await m.answer(
+        f"📊 *BOT STATISTIKASI*\n━━━━━━━━━━━━━━━━━━\n\n"
+        f"👥 Jami: *{s['total_users']}*\n🆕 Bugun: *{s['today_users']}*\n"
+        f"🚫 Bloklangan: *{s['banned_users']}*\n👑 VIP/Premium: *{s['vip_users']}*\n"
+        f"🎬 Kinolar: *{s['total_movies']}*\n🛒 Sotuvlar: *{s['total_purchases']}*\n"
+        f"🤖 AI sessiyalar: *{s['total_ai_msgs']}*", parse_mode="Markdown")
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════
 #  ADMIN PANEL
-# ══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════
+@dp.message(F.text == "🛠 Admin Panel")
+async def admin_panel(m: Message, state: FSMContext):
+    if m.from_user.id != ADMIN_ID: return
+    await m.answer("🔐 Admin parolini kiriting:")
+    await state.set_state(S.admin_auth)
 
-async def _show_admin_panel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    s    = db_get_stats()
-    text = (
-        f"Admin Panel\n\n"
-        f"Jami: {s.get('total',0)} | "
-        f"Premium: {s.get('premium',0)} | "
-        f"Ban: {s.get('banned',0)}\n"
-        f"Faol(24s): {s.get('active_24',0)} | "
-        f"Bugun: {s.get('today_msgs',0)}\n"
-        f"Rasmlar: {s.get('images',0)} | "
-        f"Kutayotgan: {s.get('pending_premium',0)}"
-    )
-    kb = kb_admin_main()
-    if update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=kb)
-    elif update.message:
-        await update.message.reply_text(text, reply_markup=kb)
-
-
-async def _check_admin_pass(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text: str):
-    ctx.user_data.pop("waiting_admin_pass", None)
-    pw = db_get("admin_password", ADMIN_PASSWORD)
-    if text == pw:
-        ctx.user_data["is_temp_admin"] = True
-        db_log_admin(update.effective_user.id, update.effective_user.full_name or "", "login_pass")
-        await _show_admin_panel(update, ctx)
+@dp.message(S.admin_auth)
+async def admin_auth(m: Message, state: FSMContext):
+    if m.text == ADMIN_PASS:
+        await state.clear()
+        await m.answer("👑 *Xush kelibsiz, Admin!*", reply_markup=get_admin_kb(), parse_mode="Markdown")
     else:
-        db_log_admin(update.effective_user.id, update.effective_user.full_name or "",
-                     "login_fail", 0, "notogri parol")
-        await update.message.reply_text("Notogri parol!")
-
-
-async def _handle_admin_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE, data: str):
-    query = update.callback_query
-    user  = update.effective_user
-
-    if not is_admin(user.id, ctx):
-        await query.edit_message_text("Sizda admin huquqi yoq!")
-        return
-
-    if data == "adm_main":
-        await _show_admin_panel(update, ctx)
-        return
-
-    if data == "adm_stats":
-        s = db_get_stats()
-        await query.edit_message_text(
-            f"Bot statistikasi\n\n"
-            f"Jami: {s.get('total',0)}\n"
-            f"Premium: {s.get('premium',0)}\n"
-            f"Faol (24s): {s.get('active_24',0)}\n"
-            f"Haftalik faol: {s.get('active_7',0)}\n"
-            f"Banlangan: {s.get('banned',0)}\n"
-            f"Bugungi xabarlar: {s.get('today_msgs',0)}\n"
-            f"Jami xabarlar: {s.get('total_msgs',0)}\n"
-            f"Rasmlar: {s.get('images',0)}\n"
-            f"Kutayotgan premium: {s.get('pending_premium',0)}",
-            reply_markup=kb_back("adm_main")
-        )
-        return
-
-    if data == "adm_users":
-        await query.edit_message_text("Foydalanuvchilar boshqaruvi", reply_markup=kb_admin_users())
-        return
-
-    if data == "adm_userlist":
-        users = db_get_all_users(20)
-        lines = ["Foydalanuvchilar (oxirgi 20)\n"]
-        for u in users:
-            badge = "[P]" if u["is_premium"] else ("[B]" if u["is_banned"] else "[-]")
-            name  = u.get("full_name") or u.get("username") or str(u["user_id"])
-            msgs  = u.get("total_msgs", 0)
-            imgs  = u.get("images_used", 0)
-            lines.append(f"{badge} {name[:20]} | {u['user_id']} | msg:{msgs} img:{imgs}")
-        await query.edit_message_text("\n".join(lines), reply_markup=kb_back("adm_users"))
-        return
-
-    if data == "adm_search":
-        ctx.user_data["admin_action"] = "search_user"
-        await query.edit_message_text("Foydalanuvchi ID, username yoki ism yozing:", reply_markup=kb_back("adm_users"))
-        return
-
-    if data == "adm_ban":
-        ctx.user_data["admin_action"] = "ban_user"
-        await query.edit_message_text(
-            "Ban qilish\n\nFormat: ID sabab\nMisol: 123456789 Spam",
-            reply_markup=kb_back("adm_users")
-        )
-        return
-
-    if data == "adm_unban":
-        ctx.user_data["admin_action"] = "unban_user"
-        await query.edit_message_text("Unban\n\nFoydalanuvchi ID sini yozing:", reply_markup=kb_back("adm_users"))
-        return
-
-    if data == "adm_note":
-        ctx.user_data["admin_action"] = "set_note"
-        await query.edit_message_text("Izoh\n\nFormat: ID izoh matni", reply_markup=kb_back("adm_users"))
-        return
-
-    if data == "adm_msg_user":
-        ctx.user_data["admin_action"] = "msg_user"
-        await query.edit_message_text("Foydalanuvchiga xabar\n\nFormat: ID xabar matni", reply_markup=kb_back("adm_users"))
-        return
-
-    if data == "adm_clear_user_hist":
-        ctx.user_data["admin_action"] = "clear_user_hist"
-        await query.edit_message_text("Foydalanuvchi tarixini ochirish\n\nID yozing:", reply_markup=kb_back("adm_users"))
-        return
-
-    if data == "adm_reset_img":
-        ctx.user_data["admin_action"] = "reset_img"
-        await query.edit_message_text("Rasm limitini reset\n\nFoydalanuvchi ID sini yozing:", reply_markup=kb_back("adm_users"))
-        return
-
-    if data == "adm_banlist":
-        bans = [u for u in db_get_all_users(100) if u["is_banned"]]
-        if not bans:
-            await query.edit_message_text("Banlangan foydalanuvchi yoq.", reply_markup=kb_back("adm_security"))
-            return
-        lines = ["Banlangan foydalanuvchilar\n"]
-        for u in bans:
-            name   = u.get("full_name") or u.get("username") or str(u["user_id"])
-            reason = u.get("ban_reason", "-")
-            lines.append(f"[B] {name} | {u['user_id']} | {reason}")
-        await query.edit_message_text("\n".join(lines), reply_markup=kb_back("adm_security"))
-        return
-
-    if data == "adm_premium":
-        await query.edit_message_text("Premium boshqaruv", reply_markup=kb_admin_premium())
-        return
-
-    if data == "adm_give_prem":
-        ctx.user_data["admin_action"] = "give_premium"
-        await query.edit_message_text(
-            "Premium berish\n\nFormat: ID kun\nMisol: 123456789 30",
-            reply_markup=kb_back("adm_premium")
-        )
-        return
-
-    if data == "adm_remove_prem":
-        ctx.user_data["admin_action"] = "remove_premium"
-        await query.edit_message_text("Premium olib tashlash\n\nFoydalanuvchi ID sini yozing:", reply_markup=kb_back("adm_premium"))
-        return
-
-    if data == "adm_change_price":
-        ctx.user_data["admin_action"] = "change_price"
-        p_uzs = db_get("premium_price_uzs")
-        p_usd = db_get("premium_price_usd")
-        await query.edit_message_text(
-            f"Narxni ozgartirish\n\nJoriy: {p_uzs} som / ${p_usd}\n\nFormat: uzs_narx usd_narx\nMisol: 50000 5",
-            reply_markup=kb_back("adm_premium")
-        )
-        return
-
-    if data == "adm_change_payment":
-        ctx.user_data["admin_action"] = "change_payment"
-        cur = db_get("premium_payment_info")
-        await query.edit_message_text(
-            f"Tolov malumotini ozgartirish\n\nJoriy:\n{cur}\n\nYangi malumotni yozing:",
-            reply_markup=kb_back("adm_premium")
-        )
-        return
-
-    if data == "adm_prem_stats":
-        prems = db_get_premium_users()
-        lines = [f"Premium statistika\n\nJami premium: {len(prems)}\n"]
-        for u in prems[:15]:
-            name = u.get("full_name") or u.get("username") or str(u["user_id"])
-            exp  = u.get("premium_expires", "")[:10]
-            lines.append(f"[P] {name[:20]} | {u['user_id']} | {exp}")
-        await query.edit_message_text("\n".join(lines), reply_markup=kb_back("adm_premium"))
-        return
-
-    if data == "adm_prem_list":
-        prems = db_get_premium_users()
-        if not prems:
-            await query.edit_message_text("Premium foydalanuvchi yoq.", reply_markup=kb_back("adm_main"))
-            return
-        lines = ["Premium foydalanuvchilar\n"]
-        for u in prems:
-            name = u.get("full_name") or u.get("username") or str(u["user_id"])
-            exp  = u.get("premium_expires", "")[:10]
-            lines.append(f"[P] {name[:20]} | {u['user_id']} | {exp}")
-        await query.edit_message_text("\n".join(lines), reply_markup=kb_back("adm_main"))
-        return
-
-    if data == "adm_prem_requests":
-        reqs = db_get_pending_requests()
-        if not reqs:
-            await query.edit_message_text("Kutayotgan premium sorovlar yoq.", reply_markup=kb_back("adm_main"))
-            return
-        lines = [f"Kutayotgan sorovlar ({len(reqs)} ta)\n"]
-        btns  = []
-        for r in reqs[:10]:
-            name  = r.get("full_name") or r.get("username") or str(r["user_id"])
-            uname = f"@{r['username']}" if r.get("username") else "-"
-            lines.append(
-                f"#{r['id']} {name} ({uname})\n"
-                f"ID: {r['user_id']} | {r['created_at'][:10]}\n"
-                f"{r.get('message','')[:80]}\n"
-            )
-            btns.append([
-                InlineKeyboardButton(
-                    f"Tasdiqlash #{r['id']}",
-                    callback_data=f"adm_approve_req_{r['id']}_{r['user_id']}"
-                ),
-                InlineKeyboardButton(
-                    "Rad",
-                    callback_data=f"adm_reject_req_{r['id']}_{r['user_id']}"
-                ),
-            ])
-        btns.append([InlineKeyboardButton("Admin menyu", callback_data="adm_main")])
-        await query.edit_message_text(
-            "\n".join(lines),
-            reply_markup=InlineKeyboardMarkup(btns)
-        )
-        return
-
-    if data == "adm_broadcast":
-        ctx.user_data["broadcast_mode"] = True
-        await query.edit_message_text(
-            "Broadcast\n\nBarcha foydalanuvchilarga yuboriladigan xabarni yozing:",
-            reply_markup=kb_back("adm_main")
-        )
-        return
-
-    if data == "adm_logs":
-        logs = db_get_admin_logs(15)
-        if not logs:
-            await query.edit_message_text("Loglar yoq.", reply_markup=kb_back("adm_main"))
-            return
-        lines = ["Oxirgi admin loglari\n"]
-        for l in logs:
-            t = l.get("created_at", "")[:16]
-            lines.append(f"{t} | {l['action']} | {l.get('admin_name','?')} -> {l.get('target_id',0)}")
-        await query.edit_message_text("\n".join(lines), reply_markup=kb_back("adm_main"))
-        return
-
-    if data == "adm_settings":
-        await query.edit_message_text("Bot sozlamalari", reply_markup=kb_admin_settings())
-        return
-
-    if data == "adm_toggle_bot":
-        cur = db_get("bot_enabled")
-        new = "0" if cur == "1" else "1"
-        db_set("bot_enabled", new)
-        s = "yoqildi" if new == "1" else "ochirildi"
-        await query.edit_message_text(f"Bot {s}", reply_markup=kb_admin_settings())
-        return
-
-    if data == "adm_toggle_img":
-        cur = db_get("image_enabled")
-        new = "0" if cur == "1" else "1"
-        db_set("image_enabled", new)
-        s = "yoqildi" if new == "1" else "ochirildi"
-        await query.edit_message_text(f"Rasm {s}", reply_markup=kb_admin_settings())
-        return
-
-    settings_actions = {
-        "adm_edit_welcome": ("edit_welcome", "Xush kelibsiz xabari", "welcome_msg"),
-        "adm_edit_maint":   ("edit_maint",   "Texnik ish xabari",   "maintenance_msg"),
-        "adm_edit_maxtok":  ("edit_maxtok",  "Max tokens",          "max_tokens"),
-        "adm_edit_temp":    ("edit_temp",    "Temperature (0.0-1.0)","temperature"),
-        "adm_edit_model":   ("edit_model",   "Grok modeli",         "grok_model"),
-    }
-    if data in settings_actions:
-        act_key, label, db_key = settings_actions[data]
-        ctx.user_data["admin_action"] = act_key
-        cur_val = db_get(db_key)
-        await query.edit_message_text(
-            f"{label}\n\nJoriy: {cur_val}\n\nYangi qiymatni yozing:",
-            reply_markup=kb_back("adm_settings")
-        )
-        return
-
-    if data == "adm_security":
-        await query.edit_message_text(
-            f"Xavfsizlik paneli\n\n"
-            f"Doimiy adminlar: {len(ADMIN_IDS)} ta\n"
-            f"Barcha harakatlar loglanadi\n"
-            f"Parol himoyasi aktiv",
-            reply_markup=kb_admin_security()
-        )
-        return
-
-    if data == "adm_change_pass":
-        ctx.user_data["admin_action"] = "change_pass"
-        await query.edit_message_text("Yangi parolni yozing (min 6 belgi):", reply_markup=kb_back("adm_security"))
-        return
-
-    if data == "adm_clear_logs":
-        conn = get_db()
-        conn.execute("DELETE FROM admin_logs")
-        conn.commit()
-        conn.close()
-        await query.edit_message_text("Loglar tozalandi.", reply_markup=kb_back("adm_security"))
-        return
-
-    if data == "adm_admin_list":
-        lines = [f"  {aid}" for aid in ADMIN_IDS]
-        await query.edit_message_text(
-            "Doimiy adminlar:\n\n" + "\n".join(lines) +
-            "\n\n(Ozgartirish uchun ADMIN_IDS ni tahrirlang)",
-            reply_markup=kb_back("adm_security")
-        )
-        return
-
-    if data == "adm_apikeys":
-        await query.edit_message_text(
-            f"API kalitlari holati\n\n"
-            f"Grok (xAI):\n  {mask_key(GROK_API_KEY)}\n\n"
-            f"Kalitni ozgartirish uchun:\nmain_bot.py faylining yuqori qismini tahrirlang.",
-            reply_markup=kb_back("adm_main")
-        )
-        return
-
-    if data == "adm_daily":
-        stats = db_get_daily_stats(7)
-        if not stats:
-            await query.edit_message_text("Malumot yoq.", reply_markup=kb_back("adm_main"))
-            return
-        lines = ["Oxirgi 7 kun\n"]
-        for s in stats:
-            lines.append(
-                f"{s['date']}\n"
-                f"  Yangi: {s['new_users']} | Xabar: {s['total_msgs']}\n"
-                f"  Rasm: {s['images_made']} | Prem req: {s.get('premium_requests',0)}\n"
-            )
-        await query.edit_message_text("\n".join(lines), reply_markup=kb_back("adm_main"))
-        return
-
-    if data == "adm_blocked":
-        words = db_get_blocked_words()
-        text  = "Bloklangan sozlar\n\n"
-        if words:
-            text += "\n".join(f"- {w}" for w in words[:50])
-        else:
-            text += "Hali soz yoq"
-        text += "\n\nQoshish: sozni yozing | Ochirish: -soz"
-        ctx.user_data["admin_action"] = "blocked_words"
-        await query.edit_message_text(text, reply_markup=kb_back("adm_main"))
-        return
-
-    if data == "adm_imgstats":
-        conn      = get_db()
-        total_img = conn.execute("SELECT COUNT(*) FROM images").fetchone()[0]
-        today_img = conn.execute(
-            "SELECT COUNT(*) FROM images WHERE date(created_at)=date('now','localtime')"
-        ).fetchone()[0]
-        top_users = conn.execute(
-            "SELECT user_id, images_used FROM users ORDER BY images_used DESC LIMIT 5"
-        ).fetchall()
-        conn.close()
-        lines = [
-            f"Rasm statistika\n\n"
-            f"Jami: {total_img}\n"
-            f"Bugun: {today_img}\n\n"
-            f"Top 5 foydalanuvchi:\n"
-        ]
-        for r in top_users:
-            lines.append(f"  {r['user_id']} — {r['images_used']} ta rasm")
-        await query.edit_message_text("\n".join(lines), reply_markup=kb_back("adm_main"))
-        return
-
-    if data == "adm_db_clean":
-        await query.edit_message_text(
-            "DB Tozalash\n\nNimani tozalash?",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("30 kundan eski suhbatlar", callback_data="adm_clean_old_conv")],
-                [InlineKeyboardButton("Eski premium sorovlar",    callback_data="adm_clean_old_reqs")],
-                [InlineKeyboardButton("Barcha loglar",            callback_data="adm_clear_logs")],
-                [InlineKeyboardButton("Admin menyu",              callback_data="adm_main")],
-            ])
-        )
-        return
-
-    if data == "adm_clean_old_conv":
-        conn = get_db()
-        cnt  = conn.execute(
-            "DELETE FROM conversations WHERE created_at < datetime('now','-30 days','localtime')"
-        ).rowcount
-        conn.commit()
-        conn.close()
-        await query.edit_message_text(f"{cnt} ta eski suhbat ochirildi.", reply_markup=kb_back("adm_main"))
-        return
-
-    if data == "adm_clean_old_reqs":
-        conn = get_db()
-        cnt  = conn.execute(
-            "DELETE FROM premium_requests WHERE status != 'pending' AND created_at < datetime('now','-30 days','localtime')"
-        ).rowcount
-        conn.commit()
-        conn.close()
-        await query.edit_message_text(f"{cnt} ta eski sorov ochirildi.", reply_markup=kb_back("adm_main"))
-        return
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-#  ADMIN TEXT ACTIONS
-# ──────────────────────────────────────────────────────────────────────────────
-
-async def _handle_admin_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
-    action = ctx.user_data.get("admin_action")
-    if not action:
-        return False
-
-    ctx.user_data.pop("admin_action", None)
-    user = update.effective_user
-
-    if action == "search_user":
-        results = db_search_user(text)
-        if not results:
-            await update.message.reply_text(f"'{text}' topilmadi.", reply_markup=kb_back("adm_users"))
-        else:
-            lines = [f"'{text}' natijalari:\n"]
-            for u in results:
-                lines.append(format_user_card(u) + "\n")
-            await update.message.reply_text("\n".join(lines), reply_markup=kb_back("adm_users"))
-        return True
-
-    if action == "ban_user":
-        parts  = text.split(maxsplit=1)
-        reason = parts[1] if len(parts) > 1 else ""
-        try:
-            uid = int(parts[0])
-            db_ban_user(uid, True, reason)
-            db_log_admin(user.id, user.full_name or "", "ban", uid, reason)
-            await update.message.reply_text(
-                f"{uid} banlandi." + (f"\nSabab: {reason}" if reason else ""),
-                reply_markup=kb_back("adm_users")
-            )
-        except ValueError:
-            await update.message.reply_text("Notogri ID format.")
-        return True
-
-    if action == "unban_user":
-        try:
-            uid = int(text.strip())
-            db_ban_user(uid, False)
-            db_log_admin(user.id, user.full_name or "", "unban", uid)
-            await update.message.reply_text(f"{uid} banlandan chiqarildi.", reply_markup=kb_back("adm_users"))
-        except ValueError:
-            await update.message.reply_text("Notogri ID.")
-        return True
-
-    if action == "set_note":
-        parts = text.split(maxsplit=1)
-        if len(parts) < 2:
-            await update.message.reply_text("Format: ID izoh")
-            return True
-        try:
-            uid  = int(parts[0])
-            note = parts[1]
-            db_set_note(uid, note)
-            db_log_admin(user.id, user.full_name or "", "set_note", uid, note[:50])
-            await update.message.reply_text(f"{uid} ga izoh qoshildi.", reply_markup=kb_back("adm_users"))
-        except ValueError:
-            await update.message.reply_text("Notogri ID.")
-        return True
-
-    if action == "msg_user":
-        parts = text.split(maxsplit=1)
-        if len(parts) < 2:
-            await update.message.reply_text("Format: ID xabar")
-            return True
-        try:
-            uid = int(parts[0])
-            msg = parts[1]
-            await ctx.bot.send_message(uid, f"Admin xabari:\n\n{msg}")
-            db_log_admin(user.id, user.full_name or "", "msg_user", uid, msg[:50])
-            await update.message.reply_text(f"{uid} ga xabar yuborildi.", reply_markup=kb_back("adm_users"))
-        except ValueError:
-            await update.message.reply_text("Notogri ID.")
-        except Exception as e:
-            await update.message.reply_text(f"Yuborib bolmadi: {e}")
-        return True
-
-    if action == "clear_user_hist":
-        try:
-            uid = int(text.strip())
-            db_clear_history(uid)
-            db_log_admin(user.id, user.full_name or "", "clear_user_hist", uid)
-            await update.message.reply_text(f"{uid} suhbat tarixi ochirildi.", reply_markup=kb_back("adm_users"))
-        except ValueError:
-            await update.message.reply_text("Notogri ID.")
-        return True
-
-    if action == "reset_img":
-        try:
-            uid = int(text.strip())
-            db_reset_images(uid)
-            db_log_admin(user.id, user.full_name or "", "reset_img", uid)
-            await update.message.reply_text(f"{uid} rasm limiti reset qilindi.", reply_markup=kb_back("adm_users"))
-        except ValueError:
-            await update.message.reply_text("Notogri ID.")
-        return True
-
-    if action == "give_premium":
-        parts = text.split()
-        try:
-            uid  = int(parts[0])
-            days = int(parts[1]) if len(parts) > 1 else 30
-            db_set_premium(uid, True, days)
-            db_log_admin(user.id, user.full_name or "", "give_premium", uid, f"{days} days")
-            try:
-                await ctx.bot.send_message(
-                    uid,
-                    f"Tabriklaymiz!\n\n{days} kunlik Premium berildi!\nBarcha premium funksiyalar faollashdi!"
-                )
-            except Exception:
-                pass
-            await update.message.reply_text(f"{uid} ga {days} kunlik premium berildi.", reply_markup=kb_back("adm_premium"))
-        except (ValueError, IndexError):
-            await update.message.reply_text("Format: ID kun (masalan: 123456789 30)")
-        return True
-
-    if action == "remove_premium":
-        try:
-            uid = int(text.strip())
-            db_set_premium(uid, False)
-            db_log_admin(user.id, user.full_name or "", "remove_premium", uid)
-            try:
-                await ctx.bot.send_message(uid, "Sizning premium obunangiz ochirildi.")
-            except Exception:
-                pass
-            await update.message.reply_text(f"{uid} dan premium olib tashlandi.", reply_markup=kb_back("adm_premium"))
-        except ValueError:
-            await update.message.reply_text("Notogri ID.")
-        return True
-
-    if action == "change_price":
-        parts = text.split()
-        try:
-            uzs = parts[0]
-            usd = parts[1] if len(parts) > 1 else "-"
-            db_set("premium_price_uzs", uzs)
-            if usd != "-":
-                db_set("premium_price_usd", usd)
-            await update.message.reply_text(f"Narx yangilandi: {uzs} som / ${usd}", reply_markup=kb_back("adm_premium"))
-        except Exception as e:
-            await update.message.reply_text(f"Xato: {e}")
-        return True
-
-    if action == "change_payment":
-        db_set("premium_payment_info", text)
-        await update.message.reply_text("Tolov malumoti yangilandi!", reply_markup=kb_back("adm_premium"))
-        return True
-
-    if action == "edit_welcome":
-        db_set("welcome_msg", text)
-        await update.message.reply_text("Xush kelibsiz xabari yangilandi!", reply_markup=kb_back("adm_settings"))
-        return True
-
-    if action == "edit_maint":
-        db_set("maintenance_msg", text)
-        await update.message.reply_text("Texnik ish xabari yangilandi!", reply_markup=kb_back("adm_settings"))
-        return True
-
-    if action == "edit_maxtok":
-        try:
-            val = int(text)
-            if not 100 <= val <= 8000:
-                raise ValueError
-            db_set("max_tokens", str(val))
-            await update.message.reply_text(f"max_tokens: {val}", reply_markup=kb_back("adm_settings"))
-        except ValueError:
-            await update.message.reply_text("100 dan 8000 gacha raqam kiriting.")
-        return True
-
-    if action == "edit_temp":
-        try:
-            val = float(text)
-            if not 0.0 <= val <= 1.0:
-                raise ValueError
-            db_set("temperature", str(val))
-            await update.message.reply_text(f"temperature: {val}", reply_markup=kb_back("adm_settings"))
-        except ValueError:
-            await update.message.reply_text("0.0 dan 1.0 gacha son kiriting.")
-        return True
-
-    if action == "edit_model":
-        db_set("grok_model", text.strip())
-        await update.message.reply_text(f"Grok modeli: {text.strip()}", reply_markup=kb_back("adm_settings"))
-        return True
-
-    if action == "change_pass":
-        if len(text) < 6:
-            await update.message.reply_text("Parol kamida 6 belgi bolishi kerak.")
-            return True
-        db_set("admin_password", text)
-        global ADMIN_PASSWORD
-        ADMIN_PASSWORD = text
-        db_log_admin(user.id, user.full_name or "", "change_password")
-        await update.message.reply_text("Parol muvaffaqiyatli ozgartirildi!", reply_markup=kb_back("adm_security"))
-        return True
-
-    if action == "blocked_words":
-        word = text.strip()
-        if word.startswith("-"):
-            w = word[1:].lower().strip()
-            db_del_blocked_word(w)
-            db_log_admin(user.id, user.full_name or "", "del_blocked_word", 0, w)
-            await update.message.reply_text(f"'{w}' ochirildi.", reply_markup=kb_back("adm_main"))
-        else:
-            db_add_blocked_word(word.lower(), user.id)
-            db_log_admin(user.id, user.full_name or "", "add_blocked_word", 0, word.lower())
-            await update.message.reply_text(f"'{word.lower()}' qoshildi.", reply_markup=kb_back("adm_main"))
-        return True
-
-    return False
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-#  BROADCAST
-# ──────────────────────────────────────────────────────────────────────────────
-
-async def _do_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text: str):
-    user  = update.effective_user
-    users = db_get_all_users(10000)
-    sent  = 0
-    fail  = 0
-    total = len(users)
-
-    prog = await update.message.reply_text(f"Yuborilmoqda... 0/{total}")
-
+        await state.clear()
+        await m.answer("❌ Parol noto'g'ri!")
+
+@dp.callback_query(F.data == "adm_close")
+async def adm_close(c: CallbackQuery):
+    await c.answer()
+    try: await c.message.delete()
+    except: pass
+
+@dp.callback_query(F.data == "adm_full_stats")
+async def adm_full_stats(c: CallbackQuery):
+    await c.answer()
+    if c.from_user.id != ADMIN_ID: return
+    s = await get_stats()
+    await c.message.edit_text(
+        f"📊 *TO'LIQ STATISTIKA*\n━━━━━━━━━━━━━━━━━━\n\n"
+        f"👥 Jami: *{s['total_users']}*\n🆕 Bugun: *{s['today_users']}*\n"
+        f"🚫 Bloklangan: *{s['banned_users']}*\n👑 VIP/Premium: *{s['vip_users']}*\n"
+        f"🎬 Kinolar: *{s['total_movies']}*\n🛒 Sotuvlar: *{s['total_purchases']}*\n"
+        f"🤖 AI sessiyalar: *{s['total_ai_msgs']}*",
+        parse_mode="Markdown", reply_markup=get_admin_kb())
+
+@dp.callback_query(F.data == "adm_ai_settings")
+async def adm_ai_set(c: CallbackQuery):
+    await c.answer()
+    if c.from_user.id != ADMIN_ID: return
+    kb = InlineKeyboardBuilder(); kb.button(text="🔙 Orqaga", callback_data="sub_back")
+    await c.message.edit_text(
+        f"🤖 *AI Sozlamalari*\n━━━━━━━━━━━━━━━━━━\n\n"
+        f"📊 Kunlik limitlar:\n👤 Oddiy: *{AI_FREE_LIMIT}* ta\n⭐ Premium: *{AI_PREMIUM_LIMIT}* ta\n👑 VIP: *Cheksiz ({AI_VIP_LIMIT})*\n\n"
+        f"🔑 Gemini API: " + ("✅ Ulangan" if GEMINI_KEY else "❌ Sozlanmagan — GEMINI_API_KEY muhit o'zgaruvchisiga qo'shing"),
+        parse_mode="Markdown", reply_markup=kb.as_markup())
+
+# ── VIP BERISH (admin) ─────────────────────────────
+@dp.callback_query(F.data == "adm_give_vip")
+async def adm_give_vip(c: CallbackQuery, state: FSMContext):
+    await c.answer()
+    if c.from_user.id != ADMIN_ID: return
+    await c.message.answer("👑 VIP berish uchun foydalanuvchi *ID* sini kiriting:", parse_mode="Markdown")
+    await state.set_state(S.vip_give_id)
+
+@dp.message(S.vip_give_id)
+async def adm_give_vip_id(m: Message, state: FSMContext):
+    if not m.text or not m.text.strip().isdigit(): return await m.answer("⚠️ Faqat ID kiriting!")
+    uid = int(m.text.strip())
+    u = await get_user(uid)
+    if not u:
+        await state.clear()
+        return await m.answer(f"❌ ID: `{uid}` topilmadi!", parse_mode="Markdown")
+    await state.clear()
+    kb = InlineKeyboardBuilder()
+    for k, p in VIP_PLANS.items():
+        kb.button(text=p['name'], callback_data=f"gv_{uid}_{k}")
+    kb.button(text="❌ Bekor", callback_data="adm_close")
+    kb.adjust(2)
+    await m.answer(f"👤 *{u['name']}* (ID: `{uid}`)\n\nQaysi rejani bermoqchisiz?",
+        parse_mode="Markdown", reply_markup=kb.as_markup())
+
+@dp.callback_query(F.data.startswith("gv_"))
+async def adm_give_vip_plan(c: CallbackQuery):
+    if c.from_user.id != ADMIN_ID: return await c.answer("❌ Ruxsat yo'q!", show_alert=True)
+    await c.answer()
+    parts = c.data.split("_", 2)
+    uid = int(parts[1]); plan_key = parts[2]
+    plan = VIP_PLANS.get(plan_key)
+    if not plan: return await c.message.answer("❌ Noma'lum plan!")
+    expires = await set_vip(uid, plan['label'], plan['days'], "admin")
+    exp = expires.strftime("%d.%m.%Y %H:%M")
+    await c.message.edit_text(f"✅ *{plan['name']}* berildi!\n👤 ID: `{uid}`\n⏰ {exp} gacha",
+        parse_mode="Markdown", reply_markup=get_admin_kb())
+    try:
+        await bot.send_message(uid,
+            f"🎁 <b>Sizga {plan['name']} berildi!</b>\n⏰ <b>{exp}</b> gacha\n🤖 AI limiti oshdi! Barcha imtiyozlardan foydalaning! 🚀",
+            parse_mode="HTML")
+    except: pass
+
+# ── OBUNA LOGLARI ──────────────────────────────────
+@dp.callback_query(F.data == "adm_sub_logs")
+async def adm_sub_logs(c: CallbackQuery):
+    await c.answer()
+    if c.from_user.id != ADMIN_ID: return
+    async with db_pool.acquire() as conn:
+        logs = await conn.fetch("SELECT user_id,user_name,channel_title,event,event_time FROM sub_logs ORDER BY event_time DESC LIMIT 40")
+    if not logs:
+        kb = InlineKeyboardBuilder(); kb.button(text="🔙 Orqaga", callback_data="sub_back")
+        return await c.message.edit_text("📋 Hozircha hodisalar yo'q.", reply_markup=kb.as_markup())
+    emj = {'first_subscribed':'🆕✅','subscribed':'✅','checked_not_subscribed':'❌','unsubscribed':'⚠️🔴'}
+    text = "📋 *Oxirgi Obuna Hodisalari*\n━━━━━━━━━━━━━━━━━━\n\n"
+    for log in logs:
+        t = log['event_time'].strftime("%m-%d %H:%M") if log['event_time'] else ''
+        text += f"{emj.get(log['event'],'❓')} *{log['user_name']}* (`{log['user_id']}`)\n   📌 {log['channel_title']} | {t}\n"
+    kb = InlineKeyboardBuilder(); kb.button(text="🔙 Orqaga", callback_data="sub_back")
+    try: await c.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="Markdown")
+    except: await bot.send_message(c.from_user.id, text, parse_mode="Markdown")
+
+# ── FOYDALANUVCHILAR ───────────────────────────────
+@dp.callback_query(F.data == "adm_users")
+async def adm_users(c: CallbackQuery):
+    await c.answer()
+    if c.from_user.id != ADMIN_ID: return
+    async with db_pool.acquire() as conn:
+        users = await conn.fetch("SELECT user_id,name,coins,joined_at,is_banned,vip_type FROM users ORDER BY joined_at DESC LIMIT 50")
+    if not users: return await c.message.answer("📭 Foydalanuvchilar yo'q!")
+    text = "👥 *FOYDALANUVCHILAR*\n━━━━━━━━━━━━━━━━━━\n\n"
     for i, u in enumerate(users, 1):
-        if u["user_id"] == user.id:
-            continue
-        try:
-            await ctx.bot.send_message(u["user_id"], f"Admin xabari:\n\n{text}")
-            sent += 1
-        except Exception:
-            fail += 1
+        s = "🚫" if u['is_banned'] else ("👑" if u['vip_type']=='vip' else ("⭐" if u['vip_type']=='premium' else "✅"))
+        text += f"{i}. {s} *{u['name']}*\n   🔑 `{u['user_id']}` | 💰 {u['coins']} | 📅 {u['joined_at']}\n"
+    kb = InlineKeyboardBuilder(); kb.button(text="🔙 Orqaga", callback_data="sub_back")
+    try: await c.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="Markdown")
+    except: await bot.send_message(c.from_user.id, text, parse_mode="Markdown")
 
-        if i % 50 == 0:
+# ── MAJBURIY OBUNA ─────────────────────────────────
+@dp.callback_query(F.data == "adm_subscription")
+async def adm_sub_menu(c: CallbackQuery):
+    await c.answer()
+    if c.from_user.id != ADMIN_ID: return
+    chs = await get_req_channels()
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Kanal Qo'shish", callback_data="sub_add")
+    if chs: kb.button(text="🗑 Kanal O'chirish", callback_data="sub_del_list")
+    kb.button(text="🔙 Orqaga", callback_data="sub_back")
+    kb.adjust(1)
+    text = "🔔 *Majburiy Obuna*\n━━━━━━━━━━━━━━━━━━\n\n"
+    if chs:
+        text += "📋 *Kanallar:*\n"
+        for ch in chs: text += f"• [{ch['title']}]({ch['link']}) — {'📱 TG' if is_tg_link(ch['link']) else '🌐 Tashqi'}\n"
+    else: text += "📭 Kanallar yo'q."
+    await c.message.edit_text(text, reply_markup=kb.as_markup(), parse_mode="Markdown", disable_web_page_preview=True)
+
+@dp.callback_query(F.data == "sub_back")
+async def sub_back(c: CallbackQuery):
+    await c.answer()
+    await c.message.edit_text("👑 *Admin Panel*", reply_markup=get_admin_kb(), parse_mode="Markdown")
+
+@dp.callback_query(F.data == "sub_add")
+async def sub_add(c: CallbackQuery, state: FSMContext):
+    await c.answer()
+    if c.from_user.id != ADMIN_ID: return
+    await c.message.answer("🔗 *Kanal linkini yuboring:*\n📱 Telegram: `https://t.me/kanalnom`\n🌐 Tashqi: `https://instagram.com/nom`", parse_mode="Markdown")
+    await state.set_state(S.sub_link)
+
+@dp.message(S.sub_link)
+async def sub_get_link(m: Message, state: FSMContext):
+    link = m.text.strip()
+    if not (link.startswith('http://') or link.startswith('https://')):
+        return await m.answer("⚠️ Link http:// yoki https:// bilan boshlanishi kerak!")
+    await state.update_data(sub_link=link)
+    await m.answer("📝 *Kanal nomini kiriting:*", parse_mode="Markdown")
+    await state.set_state(S.sub_title)
+
+@dp.message(S.sub_title)
+async def sub_get_title(m: Message, state: FSMContext):
+    try:
+        data = await state.get_data()
+        link = data.get('sub_link','')
+        await add_req_channel(link, m.text.strip())
+        await state.clear()
+        note = "⚠️ Botni kanalga admin qilib qo'shing!" if is_tg_link(link) else "✅ Tashqi kanal."
+        await m.answer(f"✅ <b>Kanal qo'shildi!</b>\n📛 {m.text.strip()}\n🔗 <code>{link}</code>\n\n{note}",
+            parse_mode="HTML", disable_web_page_preview=True, reply_markup=get_admin_kb())
+        asyncio.create_task(_broadcast_new_sub())
+    except Exception as e:
+        await state.clear()
+        await m.answer(f"❌ Xatolik: {e}")
+
+async def _broadcast_new_sub():
+    try:
+        all_u = await get_all_users()
+        for u in all_u:
+            if u['user_id'] == ADMIN_ID: continue
             try:
-                await prog.edit_text(f"Yuborilmoqda... {i}/{total}")
-            except Exception:
-                pass
-        if i % 30 == 0:
-            await asyncio.sleep(1)
+                user = await get_user(u['user_id'])
+                if not user: continue
+                ns = await check_all_subs(u['user_id'], user['name'])
+                if ns: await send_sub_msg(u['user_id'], ns)
+                await asyncio.sleep(0.05)
+            except: pass
+    except Exception as e:
+        logger.error(f"broadcast_new_sub xato: {e}")
 
-    db_log_admin(user.id, user.full_name or "", "broadcast", 0, f"sent={sent} fail={fail}")
-    try:
-        await prog.edit_text(
-            f"Broadcast tugadi!\n\nYuborildi: {sent}\nXato: {fail}\nJami: {total}"
-        )
-    except Exception:
-        await update.message.reply_text(f"Yuborildi: {sent}, Xato: {fail}")
+@dp.callback_query(F.data == "sub_del_list")
+async def sub_del_list(c: CallbackQuery):
+    await c.answer()
+    if c.from_user.id != ADMIN_ID: return
+    chs = await get_req_channels()
+    if not chs: return await c.message.answer("📭 Kanallar yo'q!")
+    kb = InlineKeyboardBuilder()
+    for ch in chs: kb.button(text=f"🗑 {ch['title']}", callback_data=f"sdel_{ch['id']}")
+    kb.button(text="🔙 Orqaga", callback_data="adm_subscription")
+    kb.adjust(1)
+    await c.message.edit_text("🗑 *O'chirmoqchi bo'lgan kanal:*", reply_markup=kb.as_markup(), parse_mode="Markdown")
 
+@dp.callback_query(F.data.startswith("sdel_"))
+async def sub_del(c: CallbackQuery):
+    if c.from_user.id != ADMIN_ID: return await c.answer("❌ Ruxsat yo'q!", show_alert=True)
+    ch_id = int(c.data[5:])
+    async with db_pool.acquire() as conn:
+        ch = await conn.fetchrow("SELECT title FROM required_channels WHERE id=$1", ch_id)
+    await remove_req_channel(ch_id)
+    await c.answer(f"✅ '{ch['title'] if ch else 'Kanal'}' o'chirildi!", show_alert=True)
+    chs = await get_req_channels()
+    kb = InlineKeyboardBuilder()
+    for ch2 in chs: kb.button(text=f"🗑 {ch2['title']}", callback_data=f"sdel_{ch2['id']}")
+    kb.button(text="🔙 Orqaga", callback_data="adm_subscription"); kb.adjust(1)
+    await c.message.edit_text("🗑 *Kanal tanlang:*" if chs else "📭 *Barcha kanallar o'chirildi.*",
+        reply_markup=kb.as_markup(), parse_mode="Markdown")
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  XATO HANDLERI
-# ══════════════════════════════════════════════════════════════════════════════
+# ── COIN QO'SHISH ──────────────────────────────────
+@dp.callback_query(F.data == "adm_add_coin")
+async def adm_add_coin(c: CallbackQuery, state: FSMContext):
+    await c.answer()
+    if c.from_user.id != ADMIN_ID: return
+    await c.message.answer("💰 Foydalanuvchi *ID* sini kiriting:", parse_mode="Markdown")
+    await state.set_state(S.coin_add_id)
 
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    err = context.error
-    if isinstance(err, (NetworkError, TimedOut)):
-        logger.warning(f"Tarmoq xatosi: {type(err).__name__}")
-        return
-    if isinstance(err, TelegramError):
-        logger.error(f"Telegram xatosi: {err}")
-        return
-    logger.error(f"Kutilmagan xato: {err}")
-    if isinstance(update, Update) and update.effective_message:
+@dp.message(S.coin_add_id)
+async def coin_add_id(m: Message, state: FSMContext):
+    if not m.text or not m.text.isdigit(): return await m.answer("⚠️ Faqat ID!")
+    u = await get_user(int(m.text))
+    if not u:
+        await state.clear()
+        return await m.answer("❌ Topilmadi!")
+    await state.update_data(target=int(m.text))
+    await m.answer(f"👤 *{u['name']}* | 💰 {u['coins']} coin\n\nQancha coin?", parse_mode="Markdown")
+    await state.set_state(S.coin_add_amt)
+
+@dp.message(S.coin_add_amt)
+async def coin_add_amt(m: Message, state: FSMContext):
+    if not m.text or not m.text.isdigit() or int(m.text)<=0: return await m.answer("⚠️ Musbat son!")
+    data = await state.get_data(); uid = data['target']; amount = int(m.text)
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE users SET coins=coins+$1 WHERE user_id=$2", amount, uid)
+    upd = await get_user(uid)
+    await state.clear()
+    await m.answer(f"✅ *+{amount} coin* qo'shildi!\n💰 Yangi: *{upd['coins']} coin*", parse_mode="Markdown", reply_markup=get_admin_kb())
+    try: await bot.send_message(uid, f"🎉 Sizga *+{amount} coin* qo'shildi!\n💰 Balans: *{upd['coins']} coin*", parse_mode="Markdown")
+    except: pass
+
+# ── COIN OLISH ─────────────────────────────────────
+@dp.callback_query(F.data == "adm_rm_coin")
+async def adm_rm_coin(c: CallbackQuery, state: FSMContext):
+    await c.answer()
+    if c.from_user.id != ADMIN_ID: return
+    await c.message.answer("💸 Foydalanuvchi *ID* sini kiriting:", parse_mode="Markdown")
+    await state.set_state(S.coin_rm_id)
+
+@dp.message(S.coin_rm_id)
+async def coin_rm_id(m: Message, state: FSMContext):
+    if not m.text or not m.text.isdigit(): return await m.answer("⚠️ Faqat ID!")
+    u = await get_user(int(m.text))
+    if not u:
+        await state.clear()
+        return await m.answer("❌ Topilmadi!")
+    await state.update_data(target=int(m.text))
+    await m.answer(f"👤 *{u['name']}* | 💰 {u['coins']} coin\n\nQancha coin olish?", parse_mode="Markdown")
+    await state.set_state(S.coin_rm_amt)
+
+@dp.message(S.coin_rm_amt)
+async def coin_rm_amt(m: Message, state: FSMContext):
+    if not m.text or not m.text.isdigit() or int(m.text)<=0: return await m.answer("⚠️ Musbat son!")
+    data = await state.get_data(); uid = data['target']; amount = int(m.text)
+    u = await get_user(uid)
+    if u['coins'] < amount:
+        await state.clear()
+        return await m.answer(f"⚠️ Faqat {u['coins']} coin bor!", reply_markup=get_admin_kb())
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE users SET coins=coins-$1 WHERE user_id=$2", amount, uid)
+    upd = await get_user(uid)
+    await state.clear()
+    await m.answer(f"✅ *-{amount} coin* yechildi!\n💰 Yangi: *{upd['coins']} coin*", parse_mode="Markdown", reply_markup=get_admin_kb())
+    try: await bot.send_message(uid, f"⚠️ Sizdan *-{amount} coin* yechildi!\n💰 Balans: *{upd['coins']} coin*", parse_mode="Markdown")
+    except: pass
+
+# ── KINO QO'SHISH ──────────────────────────────────
+@dp.callback_query(F.data == "adm_add_kino")
+async def adm_add_kino(c: CallbackQuery, state: FSMContext):
+    await c.answer()
+    if c.from_user.id != ADMIN_ID: return
+    await c.message.answer(
+        "🎬 *Kino ma'lumotlarini kiriting:*\n\nFormat: `Nom | Yil | Janr | Narx`\n\nMisol:\n`Avengers | 2019 | Fantastika | 50`\n\n💡 Tavsif AI tomonidan yoziladi!",
+        parse_mode="Markdown")
+    await state.set_state(S.kino_info)
+
+@dp.message(S.kino_info)
+async def kino_info(m: Message, state: FSMContext):
+    if not m.text: return await m.answer("⚠️ Matn formatida yuboring!")
+    parts = [p.strip() for p in m.text.split('|')]
+    if len(parts) != 4:
+        return await m.answer("⚠️ *Format noto'g'ri!*\n\nTo'g'ri: `Nom | Yil | Janr | Narx`", parse_mode="Markdown")
+    name, year, genre, price_str = parts
+    if not price_str.isdigit(): return await m.answer("⚠️ Narx faqat raqam bo'lishi kerak!")
+    await state.update_data(k_name=name, k_year=year, k_genre=genre, k_price=int(price_str))
+    proc = await m.answer("🤖 *AI tavsif yozmoqda...*", parse_mode="Markdown")
+    desc = await gemini_auto_desc(name, year)
+    try: await proc.delete()
+    except: pass
+    await state.update_data(k_desc=desc)
+    await m.answer(
+        f"✅ *Ma'lumotlar:*\n🎬 *{name}* | 📅 {year} | 🎭 {genre} | 💰 {price_str} coin\n\n📝 *AI tavsif:*\n_{desc}_\n\n🎬 *Endi video faylini yuboring:*",
+        parse_mode="Markdown")
+    await state.set_state(S.kino_file)
+
+@dp.message(S.kino_file, F.video)
+async def kino_file(m: Message, state: FSMContext):
+    data = await state.get_data()
+    nid = await add_movie(data['k_name'], data['k_year'], data.get('k_desc',''), m.video.file_id, data.get('k_price',0), data.get('k_genre'))
+    await state.clear()
+    await m.answer(f"✅ *Kino qo'shildi!*\n🆔 Kod: `{nid}`\n🎬 {data['k_name']} | 📅 {data['k_year']} | 💰 {data.get('k_price',0)} coin",
+        parse_mode="Markdown", reply_markup=get_admin_kb())
+
+@dp.message(S.kino_file)
+async def kino_file_wrong(m: Message, state: FSMContext):
+    await m.answer("⚠️ *Faqat video fayl yuboring!*\n🎬 Telegram video sifatida yuboring.", parse_mode="Markdown")
+
+# ── KINO O'CHIRISH ─────────────────────────────────
+@dp.callback_query(F.data == "adm_del_kino")
+async def adm_del_kino(c: CallbackQuery):
+    await c.answer()
+    if c.from_user.id != ADMIN_ID: return
+    mvs = await get_all_movies()
+    if not mvs: return await c.message.answer("📽 Kinolar yo'q!")
+    kb = InlineKeyboardBuilder()
+    for mv in mvs: kb.button(text=f"🗑 {mv['name']} ({mv['id']})", callback_data=f"kdel_{mv['id']}")
+    kb.button(text="❌ Bekor", callback_data="adm_close"); kb.adjust(1)
+    await c.message.edit_text("🗑 *O'chirmoqchi bo'lgan kino:*", reply_markup=kb.as_markup(), parse_mode="Markdown")
+
+@dp.callback_query(F.data.startswith("kdel_"))
+async def kino_del(c: CallbackQuery):
+    await c.answer()
+    if c.from_user.id != ADMIN_ID: return
+    mid = int(c.data[5:])
+    async with db_pool.acquire() as conn:
+        mv = await conn.fetchrow("SELECT name FROM movies WHERE id=$1", mid)
+        await conn.execute("DELETE FROM movies WHERE id=$1", mid)
+    await c.message.edit_text(f"✅ *{mv['name']}* o'chirildi!", parse_mode="Markdown", reply_markup=get_admin_kb())
+
+# ── REKLAMA ────────────────────────────────────────
+@dp.callback_query(F.data == "adm_broadcast")
+async def adm_broadcast(c: CallbackQuery, state: FSMContext):
+    await c.answer()
+    if c.from_user.id != ADMIN_ID: return
+    await c.message.answer("📢 *Xabarni yuboring:*", parse_mode="Markdown")
+    await state.set_state(S.broadcast)
+
+@dp.message(S.broadcast)
+async def do_broadcast(m: Message, state: FSMContext):
+    await state.clear()
+    users = await get_all_users()
+    ok = 0; fail = 0
+    msg = await m.answer(f"⏳ Yuborilmoqda... 0/{len(users)}")
+    for i, u in enumerate(users):
         try:
-            await update.effective_message.reply_text("Texnik xatolik. /start bosing.")
-        except Exception:
-            pass
+            await m.copy_to(chat_id=u['user_id']); ok += 1; await asyncio.sleep(0.05)
+            if i % 20 == 0:
+                try: await msg.edit_text(f"⏳ {i}/{len(users)}")
+                except: pass
+        except: fail += 1
+    await msg.edit_text(f"✅ *Reklama yuborildi!*\n📨 Muvaffaqiyatli: *{ok}*\n❌ Yuborilmagan: *{fail}*", parse_mode="Markdown")
 
+# ── BLOKLASH ───────────────────────────────────────
+@dp.callback_query(F.data == "adm_ban")
+async def adm_ban(c: CallbackQuery, state: FSMContext):
+    await c.answer()
+    if c.from_user.id != ADMIN_ID: return
+    await c.message.answer("🚫 Bloklash uchun foydalanuvchi *ID* sini kiriting:", parse_mode="Markdown")
+    await state.set_state(S.ban_id)
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  MAIN — PYDROID 3 UCHUN OPTIMALLASHTIRILGAN
-# ══════════════════════════════════════════════════════════════════════════════
+@dp.message(S.ban_id)
+async def do_ban(m: Message, state: FSMContext):
+    await state.clear()
+    if not m.text or not m.text.isdigit(): return await m.answer("⚠️ Faqat ID!")
+    uid = int(m.text)
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE users SET is_banned=TRUE WHERE user_id=$1", uid)
+    try: await bot.send_message(uid, "🚫 Siz botdan bloklangansiz.", reply_markup=ReplyKeyboardRemove())
+    except: pass
+    await m.answer(f"✅ ID `{uid}` bloklandi!", parse_mode="Markdown", reply_markup=get_admin_kb())
 
-def check_config():
-    print("=" * 50)
-    print("TELEGRAM GROK BOT — Konfiguratsiya tekshiruvi")
-    print("=" * 50)
-    errors   = []
-    warnings = []
+# ── BLOKDAN CHIQARISH ──────────────────────────────
+@dp.callback_query(F.data == "adm_unban")
+async def adm_unban(c: CallbackQuery, state: FSMContext):
+    await c.answer()
+    if c.from_user.id != ADMIN_ID: return
+    await c.message.answer("✅ Blokdan chiqarish uchun *ID* ni kiriting:", parse_mode="Markdown")
+    await state.set_state(S.unban_id)
 
-    if not BOT_TOKEN or BOT_TOKEN.startswith("BU_YERGA"):
-        errors.append("BOT_TOKEN kiritilmagan!")
-    else:
-        print(f"BOT_TOKEN: ...{BOT_TOKEN[-10:]}")
+@dp.message(S.unban_id)
+async def do_unban(m: Message, state: FSMContext):
+    await state.clear()
+    if not m.text or not m.text.isdigit(): return await m.answer("⚠️ Faqat ID!")
+    uid = int(m.text)
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE users SET is_banned=FALSE WHERE user_id=$1", uid)
+    try: await bot.send_message(uid, "✅ Blokingiz olib tashlandi! /start")
+    except: pass
+    await m.answer(f"✅ ID `{uid}` blokdan chiqarildi!", parse_mode="Markdown", reply_markup=get_admin_kb())
 
-    if not ADMIN_IDS or ADMIN_IDS == [123456789]:
-        warnings.append("ADMIN_IDS ozgartirilmagan!")
-    else:
-        print(f"ADMIN_IDS: {ADMIN_IDS}")
+# ── ADMIN CHAT ─────────────────────────────────────
+@dp.callback_query(F.data == "adm_start_chat")
+async def adm_start_chat(c: CallbackQuery, state: FSMContext):
+    await c.answer()
+    if c.from_user.id != ADMIN_ID: return
+    await state.clear()
+    await state.set_state(S.chat_target)
+    await c.message.answer("💬 *Gaplashmoqchi bo'lgan foydalanuvchi ID:*", parse_mode="Markdown")
 
-    if ADMIN_PASSWORD in ("adminparol123", "admin123", "password"):
-        warnings.append("ADMIN_PASSWORD zaif parol!")
-    else:
-        print(f"ADMIN_PASSWORD: ***{ADMIN_PASSWORD[-3:]}")
-
-    if not GROK_API_KEY or GROK_API_KEY.startswith("BU_YERGA"):
-        errors.append("GROK_API_KEY kiritilmagan!")
-    else:
-        print(f"GROK_API_KEY: {GROK_API_KEY[:8]}...{GROK_API_KEY[-4:]}")
-
-    for w in warnings:
-        print(f"OGOHLANTIRISH: {w}")
-
-    if errors:
-        for e in errors:
-            print(f"XATO: {e}")
-        print("\nmain_bot.py faylining yuqori qismini tahrirlang.")
-        print("=" * 50)
-        return False
-    print("=" * 50)
-    return True
-
-
-def main():
-    if not check_config():
-        sys.exit(1)
-
-    print("\nDatabase ishga tushirilmoqda...")
-    init_database()
-    print("Bot ishga tushirilmoqda...")
-    print(f"DB: {DB_FILE} | Log: {LOG_FILE}")
-    print()
-
-    # Pydroid 3 uchun event loop sozlash
+@dp.message(S.chat_target)
+async def chat_target(m: Message, state: FSMContext):
+    if not m.text or not m.text.strip().isdigit(): return await m.answer("⚠️ Faqat ID!")
+    tid = int(m.text.strip())
+    if tid == ADMIN_ID: return await m.answer("⚠️ O'zingizga xabar yubora olmaysiz!")
+    tu = await get_user(tid)
+    if not tu:
+        await state.clear()
+        return await m.answer(f"❌ ID `{tid}` topilmadi!", parse_mode="Markdown")
+    kb = InlineKeyboardBuilder()
+    kb.button(text="✅ Ha, gaplashaman", callback_data=f"cy_{ADMIN_ID}")
+    kb.button(text="❌ Yo'q",            callback_data=f"cn_{ADMIN_ID}")
+    kb.adjust(1)
     try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    except Exception:
-        pass
+        await bot.send_message(tid, "🔔 <b>Admin siz bilan bog'lanmoqchi!</b>\n\nSuhbatga rozimisiz?",
+            reply_markup=kb.as_markup(), parse_mode="HTML")
+        await state.set_state(S.active_chat)
+        await state.update_data(chat_with=tid, is_user=False)
+        await m.answer(f"✅ So'rov yuborildi!\n👤 *{tu['name']}* | ID: `{tid}`\n\n/stop", parse_mode="Markdown", reply_markup=get_end_chat_kb())
+    except Exception as e:
+        await state.clear()
+        await m.answer(f"❌ Xabar yuborib bo'lmadi: {e}")
 
-    async def post_init(application: Application) -> None:
-        commands = [
-            BotCommand("start",   "Botni ishga tushirish"),
-            BotCommand("menu",    "Asosiy menyu"),
-            BotCommand("premium", "Premium haqida"),
-            BotCommand("help",    "Yordam"),
-            BotCommand("admin",   "Admin paneli"),
-        ]
-        try:
-            await application.bot.set_my_commands(commands)
-            logger.info("Bot buyruqlari onatildi")
-        except Exception as e:
-            logger.warning(f"Buyruqlar onatilmadi: {e}")
+@dp.callback_query(F.data.startswith("cy_"))
+async def chat_yes(c: CallbackQuery, state: FSMContext):
+    await c.answer("✅ Suhbat boshlandi!")
+    aid = int(c.data[3:])
+    await state.set_state(S.active_chat)
+    await state.update_data(chat_with=aid, is_user=True)
+    await c.message.edit_text("✅ <b>Aloqa o'rnatildi!</b>\n\n💬 Xabaringizni yozing.\n/stop", parse_mode="HTML")
+    try:
+        await bot.send_message(aid, f"✅ *Foydalanuvchi ({c.from_user.id}) suhbatga kirdi!*\n/stop",
+            parse_mode="Markdown", reply_markup=get_end_chat_kb())
+    except: pass
 
-    app = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .connect_timeout(60)
-        .read_timeout(60)
-        .write_timeout(60)
-        .pool_timeout(60)
-        .post_init(post_init)
-        .build()
-    )
+@dp.callback_query(F.data.startswith("cn_"))
+async def chat_no(c: CallbackQuery):
+    await c.answer("❌ Rad etildi")
+    aid = int(c.data[3:])
+    await c.message.edit_text("❌ Siz suhbatni rad etdingiz.")
+    try: await bot.send_message(aid, f"😔 Foydalanuvchi ({c.from_user.id}) suhbatlashishni istamadi.", reply_markup=get_admin_kb())
+    except: pass
 
-    app.add_handler(CommandHandler("start",   cmd_start))
-    app.add_handler(CommandHandler("menu",    cmd_menu))
-    app.add_handler(CommandHandler("premium", cmd_premium))
-    app.add_handler(CommandHandler("help",    cmd_help))
-    app.add_handler(CommandHandler("admin",   cmd_admin))
-    app.add_handler(CommandHandler("stats",   cmd_stats))
-    app.add_handler(CallbackQueryHandler(handle_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_error_handler(error_handler)
+@dp.callback_query(F.data == "end_chat")
+async def end_chat(c: CallbackQuery, state: FSMContext):
+    if c.from_user.id != ADMIN_ID: return await c.answer("❌ Faqat admin uchun!", show_alert=True)
+    await c.answer()
+    data = await state.get_data()
+    partner = data.get("chat_with")
+    await state.clear()
+    try: await c.message.edit_text("🔴 *Aloqa tugadi.*", parse_mode="Markdown")
+    except: pass
+    await bot.send_message(c.from_user.id, "📴 Suhbat yakunlandi.", reply_markup=get_admin_kb())
+    if partner:
+        try: await bot.send_message(partner, "📴 Admin suhbatni tugatdi.", reply_markup=get_main_kb(partner))
+        except: pass
 
-    print("Bot muvaffaqiyatli ishga tushdi!")
-    print("Xabarlarni kutmoqda...")
-    print("Totxtatish uchun Ctrl+C\n")
-    logger.info("Bot polling boshlandi")
+# ── QO'NG'IROQ ─────────────────────────────────────
+@dp.callback_query(F.data == "adm_call_user")
+async def adm_call(c: CallbackQuery, state: FSMContext):
+    await c.answer()
+    if c.from_user.id != ADMIN_ID: return
+    await state.clear()
+    await state.set_state(S.call_id)
+    await c.message.answer("📞 *Qo'ng'iroq qilmoqchi bo'lgan foydalanuvchi ID:*", parse_mode="Markdown")
 
-    app.run_polling(
-        poll_interval        = 2.0,
-        timeout              = 60,
-        drop_pending_updates = True,
-        allowed_updates      = Update.ALL_TYPES,
-        close_loop           = False,
-    )
+@dp.message(S.call_id)
+async def do_call(m: Message, state: FSMContext):
+    if not m.text or not m.text.strip().isdigit(): return await m.answer("⚠️ Faqat ID!")
+    tid = int(m.text.strip())
+    if tid == ADMIN_ID:
+        await state.clear()
+        return await m.answer("⚠️ O'zingizga qo'ng'iroq qila olmaysiz!")
+    tu = await get_user(tid)
+    if not tu:
+        await state.clear()
+        return await m.answer(f"❌ ID `{tid}` topilmadi!", parse_mode="Markdown")
+    await state.clear()
+    akb = InlineKeyboardBuilder()
+    akb.button(text=f"📞 {tu['name']} ni chaqirish", url=f"tg://user?id={tid}")
+    akb.button(text="🔙 Admin Panel", callback_data="sub_back"); akb.adjust(1)
+    await m.answer(f"📞 *{tu['name']}* | ID: `{tid}`\n\nTugmani bosib profilga o'ting, so'ng qo'ng'iroq qiling.",
+        parse_mode="Markdown", reply_markup=akb.as_markup())
+    ukb = InlineKeyboardBuilder(); ukb.button(text="📞 Adminga qo'ng'iroq", url=f"tg://user?id={ADMIN_ID}")
+    try:
+        await bot.send_message(tid, "📞 <b>Admin siz bilan qo'ng'iroq orqali bog'lanmoqchi!</b>\nQuyidagi tugmani bosing yoki adminning qo'ng'irog'ini kuting. 📲",
+            parse_mode="HTML", reply_markup=ukb.as_markup())
+        await m.answer(f"✅ {tu['name']} ga bildirishnoma yuborildi!", reply_markup=get_admin_kb())
+    except Exception as e:
+        await m.answer(f"⚠️ Xabar yuborilmadi: {e}", reply_markup=akb.as_markup())
 
+# ═══════════════════════════════════════════════════
+#  GLOBAL HANDLER
+# ═══════════════════════════════════════════════════
+@dp.message()
+async def global_handler(m: Message, state: FSMContext):
+    u = await get_user(m.from_user.id)
+    if u and u['is_banned']:
+        await m.answer("🚫 Siz botdan bloklangansiz.")
+
+# ═══════════════════════════════════════════════════
+#  MAIN
+# ═══════════════════════════════════════════════════
+async def main():
+    keep_alive()
+    await init_db()
+    logger.info("🚀 CineBot 2026 ishga tushmoqda!")
+    await bot.delete_webhook(drop_pending_updates=True)
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    main()
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Bot to'xtatildi.")
