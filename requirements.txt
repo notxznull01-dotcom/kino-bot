@@ -1,4 +1,6 @@
 aiogram
 flask
 asyncpg
+google-generativeai
+python-dotenv
 
